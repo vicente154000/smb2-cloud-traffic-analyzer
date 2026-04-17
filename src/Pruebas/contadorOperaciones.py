@@ -2,7 +2,7 @@ import pandas as pd
 import time
 
 # Ahora apuntamos al CSV que generaste
-file_path_csv = './Trazas/Traza_user_5.csv'
+file_path_csv = './Trazas/cdTraza_user_5.csv'
 
 try:
     start_time = time.time()
