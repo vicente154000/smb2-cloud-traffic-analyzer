@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-analizador_smb2.py — Analizador de operaciones de usuario en trazas SMB2
+analizador_smb2_v2.py — Analizador de operaciones de usuario en trazas SMB2
 ===========================================================================
 TFG: Caracterizacion tecnica del protocolo SMB2 mediante analisis de trafico
 
-Este script lee un CSV exportado de Wireshark con trazas SMB2, agrupa los
-paquetes por operacion (mismo FileID y cercania temporal), y clasifica cada
-grupo en una operacion de usuario segun las definiciones de la memoria TFG.
+VERSION 2 — Agrupacion por CREATE+CLOSE (mismo FileID)
+--------------------------------------------------------
+Estrategia de agrupacion:
+  1. Cada operacion empieza con un CREATE y termina con su CLOSE (mismo FileID).
+  2. Todo lo que esta entre medias (READs, WRITEs, SET_INFO, etc.) pertenece
+     a esa operacion.
+  3. Si hay paquetes DESPUES del CLOSE hasta el siguiente CREATE del mismo
+     FileID, se descartan (asincronia / ruido).
+  4. Si un CREATE no tiene CLOSE -> DESCONOCIDA.
+  5. Paquetes sin CREATE previo (READs/WRITEs huerfanos) -> se descartan.
 
 Uso:
-    python analizador_smb2.py Trazas/Traza_user_5.csv
-    python analizador_smb2.py Trazas/Traza_user_5.csv --resumen
+    python src/analizador_smb2_v2.py Trazas/Traza_user_5.csv
+    python src/analizador_smb2_v2.py Trazas/Traza_user_5.csv --resumen
 """
 
 import csv
 import sys
 import os
 from collections import defaultdict
+
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -32,10 +40,6 @@ INFO_CLASS_END_OF_FILE_INFO    = 0x14  # FileEndOfFileInformation
 
 # CreateOptions de CREATE (columna 15)
 CREATE_OPTIONS_DIRECTORIO      = 0x01  # FILE_DIRECTORY_FILE -> es carpeta
-
-# Si entre dos paquetes del mismo FileID pasan mas de X segundos,
-# los separamos en operaciones distintas
-UMBRAL_TEMPORAL_SEG = 2.0
 
 # Comandos de "ruido" del SO que ignoramos (mantenimiento de sesion/transporte)
 RUIDO_OS = {"NEGOTIATE", "SESSION_SETUP", "LOGOFF", "TREE_CONNECT",
@@ -278,31 +282,91 @@ def leer_csv(ruta):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# AGRUPACION POR OPERACION
+# AGRUPACION POR OPERACION (V2: CREATE+CLOSE por FileID)
 # ──────────────────────────────────────────────────────────────────────
 
 def agrupar_por_operacion(paquetes):
     """
-    Agrupa los paquetes en operaciones candidatas.
+    Agrupa los paquetes en operaciones usando la estrategia CREATE+CLOSE.
 
-    Estrategia de agrupacion:
-    - Paquetes CON FileID: se agrupan por FileID. Si hay un salto temporal
-      mayor que UMBRAL_TEMPORAL_SEG entre dos paquetes del mismo FileID,
-      se separan en distintas operaciones.
-    - Paquetes SIN FileID (QUERY_DIRECTORY, QUERY_INFO): se agrupan por
-      TreeID + cercania temporal.
-
-    Cada grupo representa una operacion atomica (un solo FileID).
-    Las operaciones compuestas (upload_folder, compress, etc.) se
-    detectan a nivel de clasificacion, no de agrupacion.
+    Algoritmo:
+      1. Separar paquetes por FileID.
+      2. Para cada FileID, ordenar por timestamp.
+      3. Recorrer secuencialmente:
+         - Al encontrar un CREATE, iniciar nueva operacion.
+         - Anyadir todos los paquetes hasta encontrar un CLOSE del mismo FileID.
+         - El CLOSE cierra la operacion.
+         - Los paquetes entre el CLOSE y el siguiente CREATE se descartan.
+         - Si un CREATE no tiene CLOSE -> operacion DESCONOCIDA.
+      4. Paquetes sin FileID (QUERY_DIRECTORY, QUERY_INFO sueltos):
+         - Se agrupan por TreeID con ventana temporal de 2s.
     """
-    grupos = defaultdict(list)
+    # Separar por FileID
+    grupos_fid = defaultdict(list)
+    grupos_sin_fid = []  # paquetes sin FileID (QUERY_DIRECTORY, QUERY_INFO)
+
     for pkt in paquetes:
-        clave = pkt.file_id if pkt.file_id else f"TREE_{pkt.tree_id}"
-        grupos[clave].append(pkt)
+        if pkt.file_id:
+            grupos_fid[pkt.file_id].append(pkt)
+        else:
+            grupos_sin_fid.append(pkt)
 
     operaciones = []
-    for clave, pkts in grupos.items():
+
+    # --- Procesar paquetes CON FileID ---
+    for fid, pkts in grupos_fid.items():
+        pkts.sort(key=lambda p: p.timestamp)
+
+        i = 0
+        while i < len(pkts):
+            # Buscar el siguiente CREATE
+            if pkts[i].comando != "CREATE":
+                i += 1
+                continue
+
+            # Iniciar nueva operacion
+            op = Operacion()
+            op.anyadir(pkts[i])
+            i += 1
+
+            # Anyadir paquetes hasta encontrar un CLOSE del mismo FileID
+            encontro_close = False
+            while i < len(pkts):
+                pkt = pkts[i]
+
+                # Si encontramos otro CREATE, el anterior se queda sin CLOSE
+                if pkt.comando == "CREATE":
+                    break
+
+                op.anyadir(pkt)
+
+                if pkt.comando == "CLOSE":
+                    encontro_close = True
+                    i += 1
+                    break
+
+                i += 1
+
+            if not encontro_close:
+                # CREATE sin CLOSE -> DESCONOCIDA
+                op.tipo = "DESCONOCIDA (CREATE sin CLOSE)"
+                operaciones.append(op)
+            else:
+                operaciones.append(op)
+
+            # Los paquetes entre este CLOSE y el siguiente CREATE se descartan
+            # (el bucle while ya los saltara porque el siguiente CREATE
+            #  iniciara una nueva operacion)
+
+    # --- Procesar paquetes SIN FileID (QUERY_DIRECTORY, QUERY_INFO) ---
+    # Los agrupamos por TreeID con ventana temporal
+    grupos_tree = defaultdict(list)
+    for pkt in grupos_sin_fid:
+        clave = f"TREE_{pkt.tree_id}" if pkt.tree_id is not None else "SIN_TREE"
+        grupos_tree[clave].append(pkt)
+
+    UMBRAL_TEMPORAL_SEG = 2.0
+    for clave, pkts in grupos_tree.items():
         pkts.sort(key=lambda p: p.timestamp)
         op_actual = Operacion()
         op_actual.anyadir(pkts[0])
@@ -474,7 +538,7 @@ def clasificar_operacion(op, debug=False):
 
     # ==================================================================
     # REGLA 6: SUBIR ARCHIVO (Upload file)
-    # Secuencia: CREATE + WRITE* (con Offset=0 inicial) + CLOSE
+    # Secuencia: CREATE + WRITE* + CLOSE
     # (Memoria TFG seccion 1.3.2.2)
     # ==================================================================
     if (tiene_create and tiene_write and tiene_close
@@ -608,13 +672,13 @@ def clasificar_operacion(op, debug=False):
         return "OPERACION COMPLEJA (modif masiva)"
 
     # ==================================================================
-    # REGLA 24: RUIDO / SIN OPERACION
+    # REGLA 20: RUIDO / SIN OPERACION
     # ==================================================================
     if not tiene_create and not tiene_read and not tiene_write and not tiene_find:
         return "RUIDO/SIN OPERACION"
 
     # ==================================================================
-    # REGLA 25: Cualquier otra combinacion no reconocida
+    # REGLA 21: Cualquier otra combinacion no reconocida
     # ==================================================================
     return "DESCONOCIDA"
 
@@ -628,7 +692,7 @@ def generar_reporte(operaciones, solo_resumen=False):
     if not solo_resumen:
         print()
         print("=" * 110)
-        print("  REPORTE DE OPERACIONES SMB2")
+        print("  REPORTE DE OPERACIONES SMB2 (v2)")
         print("=" * 110)
         print(f"  Total operaciones: {len(operaciones)}")
         print("=" * 110)
@@ -661,10 +725,10 @@ def generar_reporte(operaciones, solo_resumen=False):
 
 def main():
     if len(sys.argv) < 2:
-        print("Uso: python analizador_smb2.py <archivo.csv> [--resumen] [--debug]")
-        print("Ejemplo: python analizador_smb2.py Trazas/Traza_user_5.csv")
-        print("         python analizador_smb2.py Trazas/Traza_user_5.csv --resumen")
-        print("         python analizador_smb2.py Trazas/Traza_user_5.csv --debug")
+        print("Uso: python src/analizador_smb2_v2.py <archivo.csv> [--resumen] [--debug]")
+        print("Ejemplo: python src/analizador_smb2_v2.py Trazas/Traza_user_5.csv")
+        print("         python src/analizador_smb2_v2.py Trazas/Traza_user_5.csv --resumen")
+        print("         python src/analizador_smb2_v2.py Trazas/Traza_user_5.csv --debug")
         sys.exit(1)
 
     ruta_csv = sys.argv[1]
@@ -678,7 +742,7 @@ def main():
     if not solo_resumen:
         print()
         print("=" * 70)
-        print("  ANALIZADOR DE TRAFICO SMB2")
+        print("  ANALIZADOR DE TRAFICO SMB2 (v2)")
         print(f"  Archivo: {ruta_csv}")
         print("=" * 70)
         print()
@@ -692,13 +756,13 @@ def main():
         print("  >> No se encontraron paquetes SMB2.")
         sys.exit(0)
 
-    # Paso 2: Agrupar por operacion
+    # Paso 2: Agrupar por operacion (v2: CREATE+CLOSE)
     if not solo_resumen:
         print()
-        print("[2] Agrupando paquetes por operacion...")
+        print("[2] Agrupando paquetes por operacion (CREATE+CLOSE)...")
     operaciones = agrupar_por_operacion(paquetes)
     if not solo_resumen:
-        print(f"  >> {len(operaciones)} grupos formados")
+        print(f"  >> {len(operaciones)} operaciones formadas")
 
     # Paso 3: Clasificar cada operacion
     if not solo_resumen:
