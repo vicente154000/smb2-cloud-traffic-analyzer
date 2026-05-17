@@ -1,0 +1,1253 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Documentacion del Analizador SMB2</title>
+<style>
+    body {
+        font-family: 'Calibri', 'Arial', sans-serif;
+        max-width: 900px;
+        margin: 40px auto;
+        padding: 20px;
+        line-height: 1.6;
+        color: #222;
+    }
+    h1 { font-size: 24pt; color: #1a1a2e; border-bottom: 2px solid #1a1a2e; padding-bottom: 8px; }
+    h2 { font-size: 18pt; color: #16213e; margin-top: 30px; }
+    h3 { font-size: 14pt; color: #0f3460; }
+    h4 { font-size: 12pt; color: #0f3460; }
+    table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 15px 0;
+        font-size: 10pt;
+    }
+    th, td {
+        border: 1px solid #999;
+        padding: 6px 10px;
+        text-align: left;
+        vertical-align: top;
+    }
+    th {
+        background-color: #e8e8e8;
+        font-weight: bold;
+    }
+    tr:nth-child(even) { background-color: #f8f8f8; }
+    code {
+        background-color: #f0f0f0;
+        padding: 2px 5px;
+        border-radius: 3px;
+        font-family: 'Consolas', 'Courier New', monospace;
+        font-size: 9.5pt;
+    }
+    pre {
+        background-color: #f5f5f5;
+        border: 1px solid #ddd;
+        border-left: 4px solid #0f3460;
+        padding: 12px 15px;
+        overflow-x: auto;
+        font-family: 'Consolas', 'Courier New', monospace;
+        font-size: 9pt;
+        line-height: 1.4;
+    }
+    hr { border: none; border-top: 1px solid #ccc; margin: 30px 0; }
+    blockquote {
+        border-left: 4px solid #0f3460;
+        margin: 15px 0;
+        padding: 10px 15px;
+        background-color: #f9f9ff;
+    }
+    ul, ol { margin: 10px 0; padding-left: 25px; }
+    li { margin: 4px 0; }
+    .codehilite { background-color: #f5f5f5; }
+</style>
+</head>
+<body>
+<h1>Documentacion del Analizador de Trafico SMB2</h1>
+<h2>Indice</h2>
+<ol>
+<li><a href="#4-desarrollo-y-experimentacion">DESARROLLO Y EXPERIMENTACION</a></li>
+<li><a href="#41-introduccion">Introduccion</a></li>
+<li><a href="#42-estructura-del-archivo-csv">Estructura del archivo CSV</a></li>
+<li><a href="#43-arquitectura-del-analizador">Arquitectura del analizador</a></li>
+<li><a href="#44-agrupamiento-por-fileid-v2">Agrupamiento por FileID (v2)</a></li>
+<li><a href="#45-el-problema-de-la-asincronia">El problema de la asincronia</a></li>
+<li><a href="#46-clasificacion-de-operaciones">Clasificacion de operaciones</a></li>
+<li><a href="#47-validacion-y-pruebas">Validacion y pruebas</a></li>
+<li><a href="#48-analisis-de-resultados">Analisis de resultados</a></li>
+<li><a href="#5-conclusiones-y-lineas-futuras">CONCLUSIONES Y LINEAS FUTURAS</a></li>
+<li><a href="#51-conclusiones">Conclusiones</a></li>
+<li><a href="#52-limitaciones-e-incertidumbre">Limitaciones e Incertidumbre</a></li>
+<li><a href="#53-trabajo-futuro-deteccion-de-ransomware">Trabajo Futuro: Deteccion de Ransomware</a></li>
+</ol>
+<hr />
+<h2>4. DESARROLLO Y EXPERIMENTACION</h2>
+<h3>4.1 Introduccion</h3>
+<p>El protocolo SMB2 (Server Message Block version 2) es un protocolo de red utilizado principalmente para compartir archivos, impresoras y otros recursos en redes Windows. En el contexto de la computacion en la nube, servicios como OneDrive, Google Drive o Dropbox utilizan SMB2 para la sincronizacion de archivos entre el cliente local y el servidor remoto.</p>
+<p>El objetivo de este analisis es, a partir de una traza de red capturada con Wireshark, identificar automaticamente las operaciones de usuario que se han realizado: subir archivos, descargarlos, borrarlos, renombrarlos, crear carpetas, etc.</p>
+<h4>4.1.1 Flujo general del analisis</h4>
+<p>El proceso completo sigue estos pasos:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">flowchart</span><span class="w"> </span><span class="n">LR</span>
+<span class="w">    </span><span class="n">A</span><span class="p">[</span><span class="n">Captura</span><span class="w"> </span><span class="n">Wireshark</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">formato</span><span class="w"> </span><span class="n">pcapng</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">B</span><span class="p">[</span><span class="n">Exportacion</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">CSV</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">o</span><span class="w"> </span><span class="n">formato</span><span class="w"> </span><span class="n">tabla</span><span class="p">]</span>
+<span class="w">    </span><span class="n">B</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">C</span><span class="p">[</span><span class="n">Convertir</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">CSV</span><span class="w"> </span><span class="n">estandar</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">convertir_tabla_a_csv</span><span class="p">.</span><span class="n">py</span><span class="p">]</span>
+<span class="w">    </span><span class="n">C</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">D</span><span class="p">[</span><span class="n">Lectura</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="n">filtrado</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">leer_csv</span><span class="p">]</span>
+<span class="w">    </span><span class="n">D</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">E</span><span class="p">[</span><span class="n">Agrupamiento</span><span class="w"> </span><span class="n">por</span><span class="w"> </span><span class="n">FileID</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">agrupar_por_operacion</span><span class="p">]</span>
+<span class="w">    </span><span class="n">E</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">F</span><span class="p">[</span><span class="n">Clasificacion</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">clasificar_operacion</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="mh">21</span><span class="w"> </span><span class="n">reglas</span><span class="w"> </span><span class="n">en</span><span class="w"> </span><span class="n">cascada</span><span class="p">]</span>
+<span class="w">    </span><span class="n">F</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">G</span><span class="p">[</span><span class="n">Reporte</span><span class="w"> </span><span class="k">final</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">generar_reporte</span><span class="p">]</span>
+</code></pre></div>
+
+<ol>
+<li><strong>Captura de trafico</strong> con Wireshark en formato pcapng</li>
+<li><strong>Exportacion</strong> a CSV con columnas SMB2, o a formato tabla desde Wireshark</li>
+<li><strong>Conversion</strong> del formato tabla a CSV estandar (si es necesario)</li>
+<li><strong>Lectura del CSV</strong> y filtrado de paquetes de ruido (NEGOTIATE, SESSION_SETUP, etc.)</li>
+<li><strong>Agrupamiento por FileID</strong> usando la estrategia CREATE+CLOSE</li>
+<li><strong>Clasificacion</strong> de cada operacion segun 21 reglas en cascada</li>
+<li><strong>Generacion del reporte</strong> con el resumen de operaciones detectadas</li>
+</ol>
+<hr />
+<h3>4.2 Estructura del archivo CSV</h3>
+<p>Wireshark permite exportar paquetes capturados a formato CSV con columnas personalizadas. Para este analisis, las columnas relevantes son:</p>
+<table>
+<thead>
+<tr>
+<th>Columna</th>
+<th>Contenido</th>
+<th>Descripcion</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>5</td>
+<td><code>frame.time_relative</code></td>
+<td>Timestamp del paquete (segundos desde inicio de captura)</td>
+</tr>
+<tr>
+<td>9</td>
+<td><code>smb2.cmd</code></td>
+<td>Comando SMB2 (CREATE, READ, WRITE, CLOSE, SET_INFO, etc.)</td>
+</tr>
+<tr>
+<td>10</td>
+<td><code>smb2.nt_status</code></td>
+<td>Codigo de error (0 = exito)</td>
+</tr>
+<tr>
+<td>13</td>
+<td><code>smb2.tid</code></td>
+<td>Tree ID (identificador de la sesion)</td>
+</tr>
+<tr>
+<td>14</td>
+<td><code>smb2.file_id</code></td>
+<td>FileID (identificador unico del archivo abierto)</td>
+</tr>
+<tr>
+<td>15</td>
+<td><code>smb2.create_options</code></td>
+<td>Opciones de creacion (solo para CREATE)</td>
+</tr>
+<tr>
+<td>16</td>
+<td><code>smb2.set_info.info_class</code></td>
+<td>Clase de informacion (solo para SET_INFO)</td>
+</tr>
+<tr>
+<td>19</td>
+<td><code>smb2.filename</code></td>
+<td>Ruta del archivo (solo para CREATE)</td>
+</tr>
+</tbody>
+</table>
+<h4>4.2.1 Formato del archivo</h4>
+<p>El CSV exportado por Wireshark tiene las siguientes caracteristicas:</p>
+<ul>
+<li><strong>Cabeceras</strong>: Las filas 1 a 14 contienen metadatos de la captura (informacion del filtro, estadisticas)</li>
+<li><strong>Datos</strong>: Los paquetes comienzan en la fila 17</li>
+<li><strong>Separacion</strong>: Punto y coma <code>;</code> o coma <code>,</code> segun la configuracion regional</li>
+<li><strong>Codificacion</strong>: UTF-8 con BOM</li>
+</ul>
+<h4>4.2.2 Comandos SMB2 relevantes</h4>
+<p>Los comandos SMB2 que nos interesan para el analisis son:</p>
+<table>
+<thead>
+<tr>
+<th>Comando</th>
+<th>Descripcion</th>
+<th>Rol en la operacion</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CREATE</code></td>
+<td>Abre o crea un archivo</td>
+<td>Inicia toda operacion, genera un FileID</td>
+</tr>
+<tr>
+<td><code>READ</code></td>
+<td>Lee datos del archivo</td>
+<td>Descargar, copiar, modificar</td>
+</tr>
+<tr>
+<td><code>WRITE</code></td>
+<td>Escribe datos en el archivo</td>
+<td>Subir, copiar, modificar</td>
+</tr>
+<tr>
+<td><code>CLOSE</code></td>
+<td>Cierra el archivo</td>
+<td>Finaliza la operacion</td>
+</tr>
+<tr>
+<td><code>SET_INFO</code></td>
+<td>Modifica atributos del archivo</td>
+<td>Borrar, renombrar</td>
+</tr>
+<tr>
+<td><code>QUERY_DIRECTORY</code></td>
+<td>Lista el contenido de un directorio</td>
+<td>Navegar, listar</td>
+</tr>
+<tr>
+<td><code>QUERY_INFO</code></td>
+<td>Consulta metadatos del archivo</td>
+<td>Operacion interna del sistema</td>
+</tr>
+<tr>
+<td><code>IOCTL</code></td>
+<td>Control de E/S</td>
+<td>Operaciones especificas de algunos editores</td>
+</tr>
+</tbody>
+</table>
+<h4>4.2.3 Comandos de ruido</h4>
+<p>Existen comandos SMB2 que son gestionados automaticamente por el sistema operativo y no corresponden a acciones directas del usuario. Estos se filtran y se ignoran en el analisis:</p>
+<p><code>NEGOTIATE</code>, <code>SESSION_SETUP</code>, <code>LOGOFF</code>, <code>TREE_CONNECT</code>, <code>TREE_DISCONNECT</code>, <code>ECHO</code>, <code>CANCEL</code>, <code>LOCK</code>, <code>IOCTL</code>, <code>CHANGE_NOTIFY</code>, <code>OPLOCK_BREAK</code>, <code>FLUSH</code></p>
+<hr />
+<h3>4.3 Arquitectura del analizador</h3>
+<p>El analizador se implementa en Python y sigue una arquitectura modular en cuatro fases. Existen dos versiones:</p>
+<ul>
+<li><strong>v1</strong> (<a href="src/analizador_smb2.py"><code>src/analizador_smb2.py</code></a>): Version original con agrupamiento por ventana temporal</li>
+<li><strong>v2</strong> (<a href="src/analizador_smb2_v2.py"><code>src/analizador_smb2_v2.py</code></a>): Version mejorada con agrupamiento CREATE+CLOSE por FileID (recomendada)</li>
+</ul>
+<h4>4.3.1 Estructuras de datos</h4>
+<p><strong>PaqueteSMB2</strong>: Representa un paquete individual extraido del CSV. Almacena:</p>
+<ul>
+<li><code>linea</code>: numero de linea en el CSV</li>
+<li><code>comando</code>: CREATE, READ, WRITE, CLOSE, SET_INFO, etc.</li>
+<li><code>timestamp</code>: momento de captura en segundos</li>
+<li><code>tree_id</code>: identificador de la sesion</li>
+<li><code>file_id</code>: identificador unico del archivo (FileID)</li>
+<li><code>file_path</code>: ruta del archivo (solo en CREATE)</li>
+<li><code>create_options</code>: opciones de creacion (solo en CREATE)</li>
+<li><code>info_class</code>: clase de informacion (solo en SET_INFO)</li>
+<li><code>read_len</code> / <code>write_len</code>: volumen de datos transferidos</li>
+<li><code>tiene_error</code>: indica si el comando tuvo error</li>
+</ul>
+<p><strong>Operacion</strong>: Representa un grupo de paquetes que forman una accion atomica. Almacena contadores internos que se actualizan al anyadir cada paquete:</p>
+<table>
+<thead>
+<tr>
+<th>Atributo</th>
+<th>Descripcion</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>paquetes</code></td>
+<td>Lista de PaqueteSMB2</td>
+</tr>
+<tr>
+<td><code>tipo</code></td>
+<td>Clasificacion asignada (SUBIR ARCHIVO, BORRAR, etc.)</td>
+</tr>
+<tr>
+<td><code>archivo</code></td>
+<td>Ruta del archivo involucrado</td>
+</tr>
+<tr>
+<td><code>timestamp_inicio/fin</code></td>
+<td>Intervalo temporal</td>
+</tr>
+<tr>
+<td><code>total_read/total_write</code></td>
+<td>Volumen de datos transferidos</td>
+</tr>
+<tr>
+<td><code>num_creates/num_closes/num_reads/num_writes</code></td>
+<td>Contadores por comando</td>
+</tr>
+<tr>
+<td><code>num_setinfo/num_finds/num_ioctls</code></td>
+<td>Contadores adicionales</td>
+</tr>
+<tr>
+<td><code>file_ids</code></td>
+<td>Conjunto de FileIDs distintos en la operacion</td>
+</tr>
+</tbody>
+</table>
+<h4>4.3.2 Flujo de ejecucion</h4>
+<div class="codehilite"><pre><span></span><code><span class="mf">1.</span><span class="w"> </span><span class="n">Leer</span><span class="w"> </span><span class="n">CSV</span><span class="w"> </span><span class="p">(</span><span class="n">leer_csv</span><span class="p">)</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Abrir</span><span class="w"> </span><span class="n">archivo</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Saltar</span><span class="w"> </span><span class="n">cabeceras</span><span class="w"> </span><span class="p">(</span><span class="n">filas</span><span class="w"> </span><span class="mf">1</span><span class="o">-</span><span class="mf">15</span><span class="p">)</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Para</span><span class="w"> </span><span class="n">cada</span><span class="w"> </span><span class="n">fila</span><span class="p">,</span><span class="w"> </span><span class="n">extraer</span><span class="w"> </span><span class="n">campos</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="n">crear</span><span class="w"> </span><span class="n">PaqueteSMB2</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Filtrar</span><span class="w"> </span><span class="n">comandos</span><span class="w"> </span><span class="n">de</span><span class="w"> </span><span class="n">ruido</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Devolver</span><span class="w"> </span><span class="kr">list</span><span class="n">a</span><span class="w"> </span><span class="n">de</span><span class="w"> </span><span class="n">paquetes</span>
+
+<span class="mf">2.</span><span class="w"> </span><span class="n">Agrupar</span><span class="w"> </span><span class="n">por</span><span class="w"> </span><span class="n">operacion</span><span class="w"> </span><span class="p">(</span><span class="n">agrupar_por_operacion</span><span class="p">)</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Separar</span><span class="w"> </span><span class="n">paquetes</span><span class="w"> </span><span class="n">por</span><span class="w"> </span><span class="n">FileID</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Para</span><span class="w"> </span><span class="n">cada</span><span class="w"> </span><span class="n">FileID</span><span class="p">,</span><span class="w"> </span><span class="ow">or</span><span class="n">denar</span><span class="w"> </span><span class="n">por</span><span class="w"> </span><span class="n">timestamp</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Recorrer</span><span class="w"> </span><span class="n">secuencialmente</span><span class="p">:</span><span class="w"> </span><span class="n">CREATE</span><span class="w"> </span><span class="n">inicia</span><span class="p">,</span><span class="w"> </span><span class="kr">CLOSE</span><span class="w"> </span><span class="n">cierra</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Paquetes</span><span class="w"> </span><span class="nb">sin</span><span class="w"> </span><span class="n">FileID</span><span class="p">:</span><span class="w"> </span><span class="n">agrupar</span><span class="w"> </span><span class="n">por</span><span class="w"> </span><span class="n">TreeID</span><span class="w"> </span><span class="n">con</span><span class="w"> </span><span class="n">ventana</span><span class="w"> </span><span class="n">temporal</span><span class="w"> </span><span class="n">de</span><span class="w"> </span><span class="mf">2</span><span class="n">s</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Devolver</span><span class="w"> </span><span class="kr">list</span><span class="n">a</span><span class="w"> </span><span class="n">de</span><span class="w"> </span><span class="n">Operaciones</span>
+
+<span class="mf">3.</span><span class="w"> </span><span class="n">Clasificar</span><span class="w"> </span><span class="p">(</span><span class="n">clasificar_operacion</span><span class="p">)</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Para</span><span class="w"> </span><span class="n">cada</span><span class="w"> </span><span class="n">Operacion</span><span class="p">,</span><span class="w"> </span><span class="n">extraer</span><span class="w"> </span><span class="n">caracteristicas</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Aplicar</span><span class="w"> </span><span class="mf">21</span><span class="w"> </span><span class="n">reglas</span><span class="w"> </span><span class="n">en</span><span class="w"> </span><span class="n">cascada</span><span class="w"> </span><span class="p">(</span><span class="n">de</span><span class="w"> </span><span class="n">mas</span><span class="w"> </span><span class="n">especifica</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">mas</span><span class="w"> </span><span class="n">generica</span><span class="p">)</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Asignar</span><span class="w"> </span><span class="n">un</span><span class="w"> </span><span class="n">tipo</span>
+
+<span class="mf">4.</span><span class="w"> </span><span class="n">Generar</span><span class="w"> </span><span class="n">reporte</span><span class="w"> </span><span class="p">(</span><span class="n">generar_reporte</span><span class="p">)</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="kr">List</span><span class="n">ar</span><span class="w"> </span><span class="kr">to</span><span class="n">das</span><span class="w"> </span><span class="n">las</span><span class="w"> </span><span class="n">operaciones</span><span class="w"> </span><span class="n">detectadas</span>
+<span class="w">   </span><span class="o">-</span><span class="w"> </span><span class="n">Mostrar</span><span class="w"> </span><span class="n">resumen</span><span class="w"> </span><span class="n">estadistico</span><span class="w"> </span><span class="n">por</span><span class="w"> </span><span class="n">tipo</span>
+</code></pre></div>
+
+<h4>4.3.3 Archivos del proyecto</h4>
+<table>
+<thead>
+<tr>
+<th>Archivo</th>
+<th>Descripcion</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="src/analizador_smb2_v2.py"><code>src/analizador_smb2_v2.py</code></a></td>
+<td>Analizador principal (v2, recomendado)</td>
+</tr>
+<tr>
+<td><a href="src/analizador_smb2.py"><code>src/analizador_smb2.py</code></a></td>
+<td>Analizador original (v1, mantenido como referencia)</td>
+</tr>
+<tr>
+<td><a href="src/convertir_tabla_a_csv.py"><code>src/convertir_tabla_a_csv.py</code></a></td>
+<td>Convierte formato tabla de Wireshark a CSV estandar</td>
+</tr>
+<tr>
+<td><a href="tests/test_clasificacion.py"><code>tests/test_clasificacion.py</code></a></td>
+<td>Tests de componente (30 tests)</td>
+</tr>
+<tr>
+<td><a href="tests/test_integracion.py"><code>tests/test_integracion.py</code></a></td>
+<td>Tests de integracion con trazas reales (14 tests)</td>
+</tr>
+<tr>
+<td><a href="tests/test_convertidor.py"><code>tests/test_convertidor.py</code></a></td>
+<td>Tests de regresion del convertidor (11 tests)</td>
+</tr>
+<tr>
+<td><a href="tests/conftest.py"><code>tests/conftest.py</code></a></td>
+<td>Fixtures compartidos para los tests</td>
+</tr>
+<tr>
+<td><a href="tests/validar_todas_operaciones.py"><code>tests/validar_todas_operaciones.py</code></a></td>
+<td>Script de validacion (22/22 operaciones)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3>4.4 Agrupamiento por FileID (v2)</h3>
+<h4>4.4.1 El concepto de FileID</h4>
+<p>En SMB2, cuando un cliente quiere acceder a un archivo, primero envia un comando <code>CREATE</code> que abre o crea el archivo. El servidor responde con un <strong>FileID</strong> unico que identifica ese "manejador" (handle). Todos los comandos posteriores (<code>READ</code>, <code>WRITE</code>, <code>SET_INFO</code>, <code>CLOSE</code>) que operen sobre ese archivo usaran el mismo FileID.</p>
+<p><strong>Cada comando CREATE genera un FileID diferente</strong>, incluso si se trata del mismo archivo fisico. Esto significa que una misma operacion de usuario puede generar multiples FileIDs.</p>
+<h4>4.4.2 Algoritmo de agrupacion</h4>
+<p>La estrategia de agrupacion de la v2 se basa en una idea clave:</p>
+<blockquote>
+<p><strong>Cada operacion de usuario empieza con un CREATE y termina con un CLOSE del mismo FileID. Todo lo que hay entre medias pertenece a esa operacion.</strong></p>
+</blockquote>
+<p>El algoritmo funciona asi:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">agrupar_por_operacion</span><span class="p">(</span><span class="n">paquetes</span><span class="p">):</span>
+    <span class="c1"># 1. Separar paquetes por FileID</span>
+    <span class="n">grupos_fid</span> <span class="o">=</span> <span class="n">defaultdict</span><span class="p">(</span><span class="nb">list</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">pkt</span> <span class="ow">in</span> <span class="n">paquetes</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">pkt</span><span class="o">.</span><span class="n">file_id</span><span class="p">:</span>
+            <span class="n">grupos_fid</span><span class="p">[</span><span class="n">pkt</span><span class="o">.</span><span class="n">file_id</span><span class="p">]</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">pkt</span><span class="p">)</span>
+
+    <span class="c1"># 2. Para cada FileID, procesar secuencialmente</span>
+    <span class="k">for</span> <span class="n">fid</span><span class="p">,</span> <span class="n">pkts</span> <span class="ow">in</span> <span class="n">grupos_fid</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">pkts</span><span class="o">.</span><span class="n">sort</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">p</span><span class="p">:</span> <span class="n">p</span><span class="o">.</span><span class="n">timestamp</span><span class="p">)</span>
+        <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="k">while</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">pkts</span><span class="p">):</span>
+            <span class="c1"># Buscar CREATE -&gt; iniciar operacion</span>
+            <span class="k">if</span> <span class="n">pkts</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">comando</span> <span class="o">!=</span> <span class="s2">&quot;CREATE&quot;</span><span class="p">:</span>
+                <span class="n">i</span> <span class="o">+=</span> <span class="mi">1</span>
+                <span class="k">continue</span>
+            <span class="n">op</span> <span class="o">=</span> <span class="n">Operacion</span><span class="p">()</span>
+            <span class="n">op</span><span class="o">.</span><span class="n">anyadir</span><span class="p">(</span><span class="n">pkts</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
+            <span class="n">i</span> <span class="o">+=</span> <span class="mi">1</span>
+
+            <span class="c1"># Anyadir hasta encontrar CLOSE</span>
+            <span class="k">while</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">pkts</span><span class="p">):</span>
+                <span class="k">if</span> <span class="n">pkts</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">comando</span> <span class="o">==</span> <span class="s2">&quot;CREATE&quot;</span><span class="p">:</span>
+                    <span class="k">break</span>  <span class="c1"># CREATE sin CLOSE previo</span>
+                <span class="n">op</span><span class="o">.</span><span class="n">anyadir</span><span class="p">(</span><span class="n">pkts</span><span class="p">[</span><span class="n">i</span><span class="p">])</span>
+                <span class="k">if</span> <span class="n">pkts</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="o">.</span><span class="n">comando</span> <span class="o">==</span> <span class="s2">&quot;CLOSE&quot;</span><span class="p">:</span>
+                    <span class="k">break</span>
+                <span class="n">i</span> <span class="o">+=</span> <span class="mi">1</span>
+
+            <span class="c1"># Si no hay CLOSE -&gt; DESCONOCIDA</span>
+            <span class="n">operaciones</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">op</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Diagrama del proceso:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="n">flowchart</span><span class="w"> </span><span class="n">TD</span>
+<span class="w">    </span><span class="n">A</span><span class="p">[</span><span class="n">Paquetes</span><span class="w"> </span><span class="n">del</span><span class="w"> </span><span class="n">FileID</span><span class="w"> </span><span class="n">X</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">ordenados</span><span class="w"> </span><span class="n">por</span><span class="w"> </span><span class="n">timestamp</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">B</span><span class="p">{</span><span class="n">Buscar</span><span class="w"> </span><span class="n">CREATE</span><span class="p">}</span>
+<span class="w">    </span><span class="n">B</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">No</span><span class="w"> </span><span class="n">encuentra</span><span class="o">|</span><span class="w"> </span><span class="n">Z</span><span class="p">[</span><span class="n">Fin</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">no</span><span class="w"> </span><span class="n">hay</span><span class="w"> </span><span class="n">mas</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">operaciones</span><span class="w"> </span><span class="n">en</span><span class="w"> </span><span class="n">este</span><span class="w"> </span><span class="n">FileID</span><span class="p">]</span>
+<span class="w">    </span><span class="n">B</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">Encuentra</span><span class="w"> </span><span class="n">CREATE</span><span class="o">|</span><span class="w"> </span><span class="n">C</span><span class="p">[</span><span class="n">Crear</span><span class="w"> </span><span class="n">Operacion</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">Anyadir</span><span class="w"> </span><span class="n">CREATE</span><span class="p">]</span>
+<span class="w">    </span><span class="n">C</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">D</span><span class="p">{</span><span class="n">Anyadir</span><span class="w"> </span><span class="n">siguiente</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">paquete</span><span class="p">}</span>
+<span class="w">    </span><span class="n">D</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">Es</span><span class="w"> </span><span class="n">CLOSE</span><span class="o">|</span><span class="w"> </span><span class="n">E</span><span class="p">[</span><span class="n">Cerrar</span><span class="w"> </span><span class="n">operacion</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">Anyadir</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">lista</span><span class="p">]</span>
+<span class="w">    </span><span class="n">D</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">Es</span><span class="w"> </span><span class="n">otro</span><span class="w"> </span><span class="n">CREATE</span><span class="o">|</span><span class="w"> </span><span class="n">F</span><span class="p">[</span><span class="n">CREATE</span><span class="w"> </span><span class="nf">sin</span><span class="w"> </span><span class="n">CLOSE</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">DESCONOCIDA</span><span class="p">]</span>
+<span class="w">    </span><span class="n">D</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">Otro</span><span class="w"> </span><span class="n">comando</span><span class="o">|</span><span class="w"> </span><span class="n">G</span><span class="p">[</span><span class="n">Anyadir</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">operacion</span><span class="o">&lt;</span><span class="n">br</span><span class="o">/&gt;</span><span class="n">actualizar</span><span class="w"> </span><span class="n">contadores</span><span class="p">]</span>
+<span class="w">    </span><span class="n">G</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">D</span>
+<span class="w">    </span><span class="n">E</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">B</span>
+<span class="w">    </span><span class="n">F</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">B</span>
+</code></pre></div>
+
+<h4>4.4.3 Manejo de paquetes sin FileID</h4>
+<p>Los comandos <code>QUERY_DIRECTORY</code> (listar directorio) y <code>QUERY_INFO</code> (consultar metadatos) <strong>no tienen FileID</strong> porque no operan sobre un handle abierto. Se agrupan por TreeID con una ventana temporal de 2 segundos:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">UMBRAL_TEMPORAL_SEG</span> <span class="o">=</span> <span class="mf">2.0</span>
+<span class="k">for</span> <span class="n">pkt</span> <span class="ow">in</span> <span class="n">pkts</span><span class="p">:</span>
+    <span class="n">salto</span> <span class="o">=</span> <span class="n">pkt</span><span class="o">.</span><span class="n">timestamp</span> <span class="o">-</span> <span class="n">op_actual</span><span class="o">.</span><span class="n">timestamp_fin</span>
+    <span class="k">if</span> <span class="n">salto</span> <span class="o">&gt;</span> <span class="n">UMBRAL_TEMPORAL_SEG</span><span class="p">:</span>
+        <span class="n">operaciones</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">op_actual</span><span class="p">)</span>
+        <span class="n">op_actual</span> <span class="o">=</span> <span class="n">Operacion</span><span class="p">()</span>
+    <span class="n">op_actual</span><span class="o">.</span><span class="n">anyadir</span><span class="p">(</span><span class="n">pkt</span><span class="p">)</span>
+</code></pre></div>
+
+<h4>4.4.4 Ejemplo de agrupamiento</h4>
+<p>Consideremos la siguiente secuencia de paquetes (operacion de modificar archivo):</p>
+<div class="codehilite"><pre><span></span><code><span class="n">Linea</span><span class="w"> </span><span class="mi">46</span><span class="o">:</span><span class="w"> </span><span class="n">CREATE</span><span class="w">  </span><span class="n">FID</span><span class="o">=</span><span class="n">e900</span><span class="w">  </span><span class="n">archivo</span><span class="p">.</span><span class="n">pdf</span><span class="w">   </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Inicio</span><span class="w"> </span><span class="n">sub</span><span class="o">-</span><span class="n">operacion</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">Linea</span><span class="w"> </span><span class="mi">47</span><span class="o">:</span><span class="w"> </span><span class="n">CREATE</span><span class="w">  </span><span class="n">FID</span><span class="o">=</span><span class="n">ed00</span><span class="w">  </span><span class="n">archivo</span><span class="p">.</span><span class="n">pdf</span><span class="w">   </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Inicio</span><span class="w"> </span><span class="n">sub</span><span class="o">-</span><span class="n">operacion</span><span class="w"> </span><span class="mi">2</span>
+<span class="n">Linea</span><span class="w"> </span><span class="mi">48</span><span class="o">:</span><span class="w"> </span><span class="n">READ</span><span class="w">    </span><span class="n">FID</span><span class="o">=</span><span class="n">e900</span><span class="w">                 </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Lee</span><span class="w"> </span><span class="n">el</span><span class="w"> </span><span class="n">archivo</span><span class="w"> </span><span class="n">original</span>
+<span class="n">Linea</span><span class="w"> </span><span class="mi">49</span><span class="o">:</span><span class="w"> </span><span class="n">WRITE</span><span class="w">   </span><span class="n">FID</span><span class="o">=</span><span class="n">ed00</span><span class="w">                 </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Escribe</span><span class="w"> </span><span class="n">el</span><span class="w"> </span><span class="n">archivo</span><span class="w"> </span><span class="n">modificado</span>
+<span class="n">Linea</span><span class="w"> </span><span class="mi">50</span><span class="o">:</span><span class="w"> </span><span class="n">CLOSE</span><span class="w">   </span><span class="n">FID</span><span class="o">=</span><span class="n">e900</span><span class="w">                 </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Fin</span><span class="w"> </span><span class="n">sub</span><span class="o">-</span><span class="n">operacion</span><span class="w"> </span><span class="mi">1</span>
+<span class="n">Linea</span><span class="w"> </span><span class="mi">51</span><span class="o">:</span><span class="w"> </span><span class="n">CLOSE</span><span class="w">   </span><span class="n">FID</span><span class="o">=</span><span class="n">ed00</span><span class="w">                 </span><span class="o">-&gt;</span><span class="w"> </span><span class="n">Fin</span><span class="w"> </span><span class="n">sub</span><span class="o">-</span><span class="n">operacion</span><span class="w"> </span><span class="mi">2</span>
+</code></pre></div>
+
+<p>El agrupamiento por FileID produce <strong>dos operaciones atomicas</strong>:</p>
+<ul>
+<li><strong>Operacion 1</strong> (FID=e900): <code>CREATE + READ + CLOSE</code> -&gt; BAJAR ARCHIVO</li>
+<li><strong>Operacion 2</strong> (FID=ed00): <code>CREATE + WRITE + CLOSE</code> -&gt; SUBIR ARCHIVO</li>
+</ul>
+<p>Aunque juntas forman una accion de "modificar archivo" (bajar, modificar y subir), el analisis las separa porque cada una tiene su propio FileID. Esto es intencionado: permite identificar con precision que comandos se ejecutaron sobre cada recurso.</p>
+<hr />
+<h3>4.5 El problema de la asincronia</h3>
+<h4>4.5.1 Naturaleza asincrona de SMB2</h4>
+<p>SMB2 permite que el cliente envie multiples solicitudes sin esperar la respuesta de cada una. Esto significa que:</p>
+<ul>
+<li>Los comandos pueden <strong>solaparse temporalmente</strong>: un CREATE para un archivo puede enviarse antes de que llegue el CLOSE del archivo anterior</li>
+<li>El <strong>orden de llegada</strong> de los paquetes en la traza no refleja necesariamente el orden logico de las operaciones</li>
+<li>Los <strong>CLOSE pueden llegar desordenados</strong>: el cierre de un archivo interno puede registrarse despues del cierre de la carpeta que lo contiene</li>
+</ul>
+<div class="codehilite"><pre><span></span><code><span class="n">sequenceDiagram</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">C</span><span class="w"> </span><span class="n">as</span><span class="w"> </span><span class="n">Cliente</span><span class="w"> </span><span class="n">SMB2</span>
+<span class="w">    </span><span class="n">participant</span><span class="w"> </span><span class="n">S</span><span class="w"> </span><span class="n">as</span><span class="w"> </span><span class="n">Servidor</span><span class="w"> </span><span class="n">SMB2</span>
+
+<span class="w">    </span><span class="n">Note</span><span class="w"> </span><span class="n">over</span><span class="w"> </span><span class="n">C</span><span class="p">,</span><span class="n">S</span><span class="o">:</span><span class="w"> </span><span class="n">Operacion</span><span class="o">:</span><span class="w"> </span><span class="n">subir</span><span class="w"> </span><span class="n">carpeta</span><span class="w"> </span><span class="n">con</span><span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="n">archivos</span>
+
+<span class="w">    </span><span class="n">C</span><span class="o">-&gt;&gt;</span><span class="n">S</span><span class="o">:</span><span class="w"> </span><span class="n">CREATE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">a1</span><span class="w"> </span><span class="n">carpeta</span><span class="o">/</span>
+<span class="w">    </span><span class="n">C</span><span class="o">-&gt;&gt;</span><span class="n">S</span><span class="o">:</span><span class="w"> </span><span class="n">CREATE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">b1</span><span class="w"> </span><span class="n">carpeta</span><span class="o">/</span><span class="n">archivo1.txt</span>
+<span class="w">    </span><span class="n">C</span><span class="o">-&gt;&gt;</span><span class="n">S</span><span class="o">:</span><span class="w"> </span><span class="n">WRITE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">b1</span><span class="w"> </span><span class="n">datos...</span>
+<span class="w">    </span><span class="n">S</span><span class="o">--&gt;&gt;</span><span class="n">C</span><span class="o">:</span><span class="w"> </span><span class="n">Respuesta</span><span class="w"> </span><span class="n">CREATE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">a1</span>
+<span class="w">    </span><span class="n">C</span><span class="o">-&gt;&gt;</span><span class="n">S</span><span class="o">:</span><span class="w"> </span><span class="n">CREATE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">c1</span><span class="w"> </span><span class="n">carpeta</span><span class="o">/</span><span class="n">archivo2.txt</span>
+<span class="w">    </span><span class="n">S</span><span class="o">--&gt;&gt;</span><span class="n">C</span><span class="o">:</span><span class="w"> </span><span class="n">Respuesta</span><span class="w"> </span><span class="n">WRITE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">b1</span>
+<span class="w">    </span><span class="n">C</span><span class="o">-&gt;&gt;</span><span class="n">S</span><span class="o">:</span><span class="w"> </span><span class="n">CLOSE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">b1</span>
+<span class="w">    </span><span class="n">S</span><span class="o">--&gt;&gt;</span><span class="n">C</span><span class="o">:</span><span class="w"> </span><span class="n">Respuesta</span><span class="w"> </span><span class="n">CREATE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">c1</span>
+<span class="w">    </span><span class="n">C</span><span class="o">-&gt;&gt;</span><span class="n">S</span><span class="o">:</span><span class="w"> </span><span class="n">WRITE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">c1</span><span class="w"> </span><span class="n">datos...</span>
+<span class="w">    </span><span class="n">S</span><span class="o">--&gt;&gt;</span><span class="n">C</span><span class="o">:</span><span class="w"> </span><span class="n">Respuesta</span><span class="w"> </span><span class="n">CLOSE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">b1</span>
+<span class="w">    </span><span class="n">C</span><span class="o">-&gt;&gt;</span><span class="n">S</span><span class="o">:</span><span class="w"> </span><span class="n">CLOSE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">c1</span>
+<span class="w">    </span><span class="n">S</span><span class="o">--&gt;&gt;</span><span class="n">C</span><span class="o">:</span><span class="w"> </span><span class="n">Respuesta</span><span class="w"> </span><span class="n">WRITE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">c1</span>
+<span class="w">    </span><span class="n">S</span><span class="o">--&gt;&gt;</span><span class="n">C</span><span class="o">:</span><span class="w"> </span><span class="n">Respuesta</span><span class="w"> </span><span class="n">CLOSE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">c1</span>
+<span class="w">    </span><span class="n">C</span><span class="o">-&gt;&gt;</span><span class="n">S</span><span class="o">:</span><span class="w"> </span><span class="n">CLOSE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">a1</span><span class="w">  </span><span class="o">&lt;-</span><span class="w"> </span><span class="n">cierre</span><span class="w"> </span><span class="n">tardio</span><span class="w"> </span><span class="n">de</span><span class="w"> </span><span class="n">la</span><span class="w"> </span><span class="n">carpeta</span>
+<span class="w">    </span><span class="n">S</span><span class="o">--&gt;&gt;</span><span class="n">C</span><span class="o">:</span><span class="w"> </span><span class="n">Respuesta</span><span class="w"> </span><span class="n">CLOSE</span><span class="w"> </span><span class="n">FID</span><span class="o">=</span><span class="n">a1</span>
+
+<span class="w">    </span><span class="n">Note</span><span class="w"> </span><span class="n">over</span><span class="w"> </span><span class="n">C</span><span class="p">,</span><span class="n">S</span><span class="o">:</span><span class="w"> </span><span class="n">Los</span><span class="w"> </span><span class="n">CLOSE</span><span class="w"> </span><span class="n">llegan</span><span class="w"> </span><span class="n">en</span><span class="w"> </span><span class="n">orden</span><span class="w"> </span><span class="n">distinto</span><span class="w"> </span><span class="n">al</span><span class="w"> </span><span class="n">de</span><span class="w"> </span><span class="n">los</span><span class="w"> </span><span class="n">CREATE</span>
+</code></pre></div>
+
+<h4>4.5.2 Como lo resuelve la v2</h4>
+<p>La v2 maneja la asincronia de forma natural porque <strong>cada FileID se procesa por separado</strong>. Aunque en la traza original los paquetes esten entremezclados:</p>
+<div class="codehilite"><pre><span></span><code>CREATE FID=a1  (operacion A)
+WRITE  FID=a1
+CREATE FID=b1  (operacion B - empieza antes de que A termine)
+WRITE  FID=b1
+CLOSE  FID=a1  (A termina)
+WRITE  FID=b1
+CLOSE  FID=b1  (B termina)
+</code></pre></div>
+
+<p>Al separar por FileID, cada secuencia queda limpia:</p>
+<ul>
+<li>FileID=a1: <code>[CREATE, WRITE, CLOSE]</code> -&gt; SUBIR ARCHIVO</li>
+<li>FileID=b1: <code>[CREATE, WRITE, WRITE, CLOSE]</code> -&gt; SUBIR ARCHIVO</li>
+</ul>
+<p><strong>No se necesita ventana temporal ni umbral</strong> porque el FileID es la unica referencia fiable.</p>
+<hr />
+<h3>4.6 Clasificacion de operaciones</h3>
+<h4>4.6.1 Reglas de clasificacion (21 reglas)</h4>
+<p>Cada operacion atomica agrupada por FileID se clasifica segun los comandos SMB2 que contiene. Las reglas se aplican en <strong>orden de prioridad</strong> (de mas especifica a mas generica). La primera que cumple las condiciones gana.</p>
+<h5>Regla 1: LISTAR DIRECTORIO</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + FIND* + CLOSE</code> (sin READ, WRITE, SET_INFO)</li>
+<li><strong>Descripcion</strong>: El usuario navega por las carpetas del explorador de archivos</li>
+<li><strong>Ejemplo</strong>: <code>CREATE</code> + <code>QUERY_DIRECTORY</code> + <code>CLOSE</code></li>
+</ul>
+<h5>Regla 2: CREAR CARPETA</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE</code> (con CreateOptions bit directorio) + <code>CLOSE</code> (sin E/S)</li>
+<li><strong>Descripcion</strong>: El usuario crea una nueva carpeta</li>
+<li><strong>Ejemplo</strong>: <code>CREATE(opt=0x21)</code> + <code>CLOSE</code></li>
+</ul>
+<h5>Regla 3: CREAR ARCHIVO VACIO</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE</code> (sin bit directorio) + <code>CLOSE</code> (sin E/S, sin FIND)</li>
+<li><strong>Descripcion</strong>: El usuario crea un archivo sin contenido</li>
+<li><strong>Ejemplo</strong>: <code>CREATE(opt=0x60)</code> + <code>CLOSE</code></li>
+</ul>
+<h5>Regla 4: BORRAR (archivo o carpeta)</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + SET_INFO(InfoClass=0x0D) + CLOSE</code> (sin E/S)</li>
+<li><strong>InfoClass</strong>: <code>0x0D</code> = <code>FileDispositionInformation</code> (marcar para borrar)</li>
+<li><strong>Descripcion</strong>: El usuario envia un archivo a la papelera o lo elimina</li>
+<li><strong>Ejemplo</strong>: <code>CREATE</code> + <code>SET_INFO(cls=0x0D)</code> + <code>CLOSE</code></li>
+</ul>
+<h5>Regla 5: RENOMBRAR / MOVER (archivo o carpeta)</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + SET_INFO(InfoClass=0x0A) + CLOSE</code> (sin E/S)</li>
+<li><strong>InfoClass</strong>: <code>0x0A</code> = <code>FileRenameInformation</code></li>
+<li><strong>Descripcion</strong>: El usuario cambia el nombre o mueve el archivo a otra carpeta</li>
+<li><strong>Ejemplo</strong>: <code>CREATE</code> + <code>SET_INFO(cls=0x0A)</code> + <code>CLOSE</code></li>
+</ul>
+<h5>Regla 6: SUBIR ARCHIVO</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + WRITE* + CLOSE</code> (sin READ, sin FIND)</li>
+<li><strong>Descripcion</strong>: El usuario sube un archivo desde su equipo a la nube</li>
+<li><strong>Ejemplo</strong>: <code>CREATE</code> + <code>WRITE</code> + <code>WRITE</code> + ... + <code>CLOSE</code></li>
+</ul>
+<h5>Regla 7: BAJAR ARCHIVO</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + READ* + CLOSE</code> (sin WRITE, sin FIND)</li>
+<li><strong>Descripcion</strong>: El usuario descarga un archivo desde la nube a su equipo</li>
+<li><strong>Ejemplo</strong>: <code>CREATE</code> + <code>READ</code> + <code>READ</code> + ... + <code>CLOSE</code></li>
+</ul>
+<h5>Regla 8: SUBIR CARPETA</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + FIND + WRITE* + CLOSE</code> con <code>num_creates &gt;= 2</code></li>
+<li><strong>Descripcion</strong>: El usuario sube una carpeta completa con su contenido</li>
+<li><strong>Nota</strong>: Requiere multiples CREATEs en el mismo grupo (poco frecuente)</li>
+</ul>
+<h5>Regla 9: BAJAR CARPETA</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + FIND + READ* + CLOSE</code> con <code>num_creates &gt;= 2</code></li>
+<li><strong>Descripcion</strong>: El usuario descarga una carpeta completa</li>
+</ul>
+<h5>Regla 10: COPIAR ARCHIVO (subida)</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + SET_INFO + WRITE* + CLOSE</code> (sin READ, sin FIND)</li>
+<li><strong>Descripcion</strong>: El usuario copia un archivo (flujo de subida)</li>
+<li><strong>Nota</strong>: Nunca se alcanza en la practica (regla 6 captura antes)</li>
+</ul>
+<h5>Regla 11: COPIAR ARCHIVO (descarga)</h5>
+<ul>
+<li><strong>Patron</strong>: Identico a BAJAR ARCHIVO (regla 7)</li>
+<li><strong>Nota</strong>: Nunca se alcanza, es un <code>pass</code> en el codigo</li>
+</ul>
+<h5>Regla 12: COPIAR CARPETA</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + FIND + READ + WRITE + CLOSE</code> con <code>num_creates &gt;= 2</code></li>
+<li><strong>Descripcion</strong>: El usuario copia una carpeta completa</li>
+</ul>
+<h5>Regla 13: COMPRIMIR ARCHIVO</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + READ + WRITE + CLOSE</code> con <code>SET_INFO(AllocationInfo=0x13)</code> y <code>num_file_ids &gt;= 2</code></li>
+<li><strong>Descripcion</strong>: El usuario comprime un archivo (lee original, escribe comprimido)</li>
+</ul>
+<h5>Regla 14: COMPRIMIR CARPETA</h5>
+<ul>
+<li><strong>Patron</strong>: <code>FIND + READ + WRITE + CREATE + CLOSE</code> con <code>num_file_ids &gt;= 3</code></li>
+<li><strong>Descripcion</strong>: El usuario comprime una carpeta completa</li>
+</ul>
+<h5>Regla 15: MODIFICAR ARCHIVO (con editor)</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + READ + WRITE + CLOSE</code> con <code>IOCTL</code> y <code>num_file_ids &gt;= 2</code></li>
+<li><strong>Descripcion</strong>: El usuario abre un archivo con un editor (Notepad, etc.), lo modifica y lo guarda</li>
+<li><strong>Ejemplo</strong>: <code>CREATE</code> + <code>READ</code> + <code>CLOSE</code> + <code>CREATE</code> + <code>SET_INFO</code> + <code>WRITE</code> + <code>IOCTL</code> + <code>CLOSE</code></li>
+</ul>
+<h5>Regla 16: MODIFICAR ARCHIVO (comando atomico)</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + SET_INFO + WRITE + CLOSE</code> (sin READ, sin FIND)</li>
+<li><strong>InfoClass</strong>: <code>0x14</code> = <code>FileEndOfFileInformation</code> (truncar al final)</li>
+<li><strong>Descripcion</strong>: Modificacion atomica (el cliente escribe directamente sin leer antes)</li>
+</ul>
+<h5>Regla 17: CONSULTAR METADATOS</h5>
+<ul>
+<li><strong>Patron</strong>: Solo <code>QUERY_INFO</code>, sin CREATE, READ ni WRITE</li>
+<li><strong>Descripcion</strong>: El sistema consulta propiedades del archivo (tamano, fecha, atributos)</li>
+</ul>
+<h5>Regla 18: APERTURA EFIMERA</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + CLOSE</code> sin E/S, SET_INFO ni FIND</li>
+<li><strong>Descripcion</strong>: Apertura y cierre sin operacion de datos</li>
+<li><strong>Nota</strong>: Nunca se alcanza (reglas 2 y 3 capturan antes)</li>
+</ul>
+<h5>Regla 19: OPERACION COMPLEJA</h5>
+<ul>
+<li><strong>Patron</strong>: <code>CREATE + READ + WRITE + CLOSE</code> con <code>num_creates &gt;= 3</code> y sin FIND</li>
+<li><strong>Subtipos</strong>: <code>modif+borrar</code>, <code>modif+renombrar</code>, <code>modif+borrar+renombrar</code>, <code>modif masiva</code></li>
+<li><strong>Descripcion</strong>: Operaciones que combinan lectura, escritura y cambios de atributos</li>
+</ul>
+<h5>Regla 20: RUIDO / SIN OPERACION</h5>
+<ul>
+<li><strong>Patron</strong>: Sin CREATE, READ, WRITE ni FIND</li>
+<li><strong>Descripcion</strong>: Paquetes residuales (CLOSE sueltos, QUERY_INFO aislados)</li>
+</ul>
+<h5>Regla 21: DESCONOCIDA</h5>
+<ul>
+<li><strong>Patron</strong>: Cualquier otra combinacion no reconocida</li>
+<li><strong>Descripcion</strong>: Operaciones que no encajan en ninguna regla anterior</li>
+</ul>
+<h4>4.6.2 Arbol de decision</h4>
+<div class="codehilite"><pre><span></span><code><span class="n">flowchart</span><span class="w"> </span><span class="n">TD</span>
+<span class="w">    </span><span class="n">INICIO</span><span class="p">[</span><span class="s">&quot;clasificar_operacion(op)&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">R1</span>
+
+<span class="w">    </span><span class="n">R1</span><span class="p">[</span><span class="s">&quot;Regla 1: CREATE+FIND+CLOSE&lt;br/&gt;sin READ/WRITE/SET_INFO&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R2</span>
+<span class="w">    </span><span class="n">R1</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R1_OUT</span><span class="p">[</span><span class="s">&quot;LISTAR DIRECTORIO&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R2</span><span class="p">[</span><span class="s">&quot;Regla 2: CREATE(dir)+CLOSE&lt;br/&gt;sin READ/WRITE/SET_INFO&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R3</span>
+<span class="w">    </span><span class="n">R2</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R2_OUT</span><span class="p">[</span><span class="s">&quot;CREAR CARPETA&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R3</span><span class="p">[</span><span class="s">&quot;Regla 3: CREATE(no dir)+CLOSE&lt;br/&gt;sin READ/WRITE/SET_INFO/FIND&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R4</span>
+<span class="w">    </span><span class="n">R3</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R3_OUT</span><span class="p">[</span><span class="s">&quot;CREAR ARCHIVO VACIO&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R4</span><span class="p">[</span><span class="s">&quot;Regla 4: CREATE+SET_INFO(0x0D)+CLOSE&lt;br/&gt;sin READ/WRITE&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R5</span>
+<span class="w">    </span><span class="n">R4</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R4_OUT</span><span class="p">[</span><span class="s">&quot;BORRAR ARCHIVO/CARPETA&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R5</span><span class="p">[</span><span class="s">&quot;Regla 5: CREATE+SET_INFO(0x0A)+CLOSE&lt;br/&gt;sin READ/WRITE&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R6</span>
+<span class="w">    </span><span class="n">R5</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R5_OUT</span><span class="p">[</span><span class="s">&quot;RENOMBRAR/MOVER&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R6</span><span class="p">[</span><span class="s">&quot;Regla 6: CREATE+WRITE+CLOSE&lt;br/&gt;sin READ/FIND&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R7</span>
+<span class="w">    </span><span class="n">R6</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R6_OUT</span><span class="p">[</span><span class="s">&quot;SUBIR ARCHIVO&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R7</span><span class="p">[</span><span class="s">&quot;Regla 7: CREATE+READ+CLOSE&lt;br/&gt;sin WRITE/FIND&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R8_14</span>
+<span class="w">    </span><span class="n">R7</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R7_OUT</span><span class="p">[</span><span class="s">&quot;BAJAR ARCHIVO&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R8_14</span><span class="p">[</span><span class="s">&quot;Reglas 8-14: Multi-FileID&lt;br/&gt;FIND, READ, WRITE, SET_INFO&lt;br/&gt;num_creates&gt;=2 o num_fid&gt;=2&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R15</span>
+
+<span class="w">    </span><span class="n">R15</span><span class="p">[</span><span class="s">&quot;Regla 15: CREATE+READ+WRITE+CLOSE&lt;br/&gt;IOCTL, num_fid&gt;=2&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R16</span>
+<span class="w">    </span><span class="n">R15</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R15_OUT</span><span class="p">[</span><span class="s">&quot;MODIFICAR (editor)&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R16</span><span class="p">[</span><span class="s">&quot;Regla 16: CREATE+SET_INFO+WRITE+CLOSE&lt;br/&gt;sin READ/FIND&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R17</span>
+<span class="w">    </span><span class="n">R16</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R16_OUT</span><span class="p">[</span><span class="s">&quot;MODIFICAR (atomico)&lt;br/&gt;o COPIAR (subida)&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R17</span><span class="p">[</span><span class="s">&quot;Regla 17: Solo QUERY_INFO&lt;br/&gt;sin CREATE/READ/WRITE&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R18</span>
+<span class="w">    </span><span class="n">R17</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R17_OUT</span><span class="p">[</span><span class="s">&quot;CONSULTAR METADATOS&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R18</span><span class="p">[</span><span class="s">&quot;Regla 18: CREATE+CLOSE&lt;br/&gt;sin E/S/SET_INFO/FIND&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R19</span>
+<span class="w">    </span><span class="n">R18</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R18_OUT</span><span class="p">[</span><span class="s">&quot;APERTURA EFIMERA&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R19</span><span class="p">[</span><span class="s">&quot;Regla 19: CREATE+READ+WRITE+CLOSE&lt;br/&gt;num_creates&gt;=3, sin FIND&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R20</span>
+<span class="w">    </span><span class="n">R19</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R19_OUT</span><span class="p">[</span><span class="s">&quot;OPERACION COMPLEJA&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R20</span><span class="p">[</span><span class="s">&quot;Regla 20: Sin CREATE/READ/WRITE/FIND&quot;</span><span class="p">]</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">no</span><span class="o">|</span><span class="w"> </span><span class="n">R21</span>
+<span class="w">    </span><span class="n">R20</span><span class="w"> </span><span class="o">--&gt;|</span><span class="n">si</span><span class="o">|</span><span class="w"> </span><span class="n">R20_OUT</span><span class="p">[</span><span class="s">&quot;RUIDO/SIN OPERACION&quot;</span><span class="p">]</span>
+
+<span class="w">    </span><span class="n">R21</span><span class="p">[</span><span class="s">&quot;Regla 21: DESCONOCIDA&quot;</span><span class="p">]</span>
+</code></pre></div>
+
+<h4>4.6.3 Codigos de informacion SET_INFO</h4>
+<p>El comando <code>SET_INFO</code> utiliza el campo <code>InfoClass</code> para indicar que atributo del archivo se va a modificar:</p>
+<table>
+<thead>
+<tr>
+<th>InfoClass</th>
+<th>Nombre</th>
+<th>Operacion</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0x0A</code> (10)</td>
+<td><code>FileRenameInformation</code></td>
+<td>Renombrar o mover el archivo</td>
+</tr>
+<tr>
+<td><code>0x0D</code> (13)</td>
+<td><code>FileDispositionInformation</code></td>
+<td>Borrar el archivo</td>
+</tr>
+<tr>
+<td><code>0x04</code> (4)</td>
+<td><code>FileBasicInformation</code></td>
+<td>Modificar atributos basicos</td>
+</tr>
+<tr>
+<td><code>0x13</code> (19)</td>
+<td><code>FileAllocationInformation</code></td>
+<td>Reservar espacio (compresion)</td>
+</tr>
+<tr>
+<td><code>0x14</code> (20)</td>
+<td><code>FileEndOfFileInformation</code></td>
+<td>Truncar al final (modificacion atomica)</td>
+</tr>
+</tbody>
+</table>
+<h4>4.6.4 Opciones de creacion CREATE</h4>
+<p>El comando <code>CREATE</code> utiliza el campo <code>CreateOptions</code> para indicar el tipo de archivo:</p>
+<table>
+<thead>
+<tr>
+<th>Valor</th>
+<th>Nombre</th>
+<th>Significado</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0x01</code> (1)</td>
+<td><code>FILE_DIRECTORY_FILE</code></td>
+<td>El recurso es un directorio (carpeta)</td>
+</tr>
+<tr>
+<td><code>0x20</code> (32)</td>
+<td><code>FILE_NON_DIRECTORY_FILE</code></td>
+<td>El recurso es un archivo normal</td>
+</tr>
+<tr>
+<td><code>0x40</code> (96)</td>
+<td><code>FILE_COMPLETE_IF_OPLOCKED</code></td>
+<td>Comportamiento de oplock</td>
+</tr>
+<tr>
+<td><code>0x100000</code> (1048576)</td>
+<td><code>FILE_DELETE_ON_CLOSE</code></td>
+<td>Borrar al cerrar</td>
+</tr>
+</tbody>
+</table>
+<h4>4.6.5 Operaciones no clasificadas (DESCONOCIDA)</h4>
+<p>Algunas operaciones no encajan en ninguna regla. Esto puede ocurrir por:</p>
+<ol>
+<li><strong>Operaciones incompletas</strong>: Un <code>CREATE</code> sin su <code>CLOSE</code> correspondiente (la captura empezo despues o termino antes)</li>
+<li><strong>Patrones asincronos complejos</strong>: Secuencias de comandos que no siguen el patron tipico</li>
+<li><strong>Comandos de sistema</strong>: Operaciones internas del cliente SMB2 que no corresponden a acciones directas del usuario</li>
+<li><strong>CreateOptions no estandar</strong>: Valores de creacion que no son ni directorio ni archivo normal</li>
+</ol>
+<p>Estas operaciones se etiquetan como <code>DESCONOCIDA</code> y pueden analizarse manualmente para identificar nuevos patrones.</p>
+<h4>4.6.6 Reglas que nunca se alcanzan</h4>
+<p>En la practica, con el algoritmo de agrupacion por FileID, algunas reglas nunca se activan en trazas reales:</p>
+<table>
+<thead>
+<tr>
+<th>Regla</th>
+<th>Motivo</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Regla 8</strong>: SUBIR CARPETA</td>
+<td>Requiere <code>num_creates &gt;= 2</code> en el mismo grupo. Cada archivo tiene su propio FileID, por lo que se separan en operaciones individuales</td>
+</tr>
+<tr>
+<td><strong>Regla 9</strong>: BAJAR CARPETA</td>
+<td>Mismo motivo que regla 8</td>
+</tr>
+<tr>
+<td><strong>Regla 10</strong>: COPIAR ARCHIVO (subida)</td>
+<td>Regla 6 (SUBIR ARCHIVO) no comprueba SET_INFO, captura antes</td>
+</tr>
+<tr>
+<td><strong>Regla 11</strong>: COPIAR ARCHIVO (descarga)</td>
+<td>Identica a regla 7 (BAJAR ARCHIVO), nunca se alcanza</td>
+</tr>
+<tr>
+<td><strong>Regla 12</strong>: COPIAR CARPETA</td>
+<td>Requiere <code>num_creates &gt;= 2</code> (multi-FileID)</td>
+</tr>
+<tr>
+<td><strong>Regla 13</strong>: COMPRIMIR ARCHIVO</td>
+<td>Requiere <code>num_file_ids &gt;= 2</code> (multi-FileID)</td>
+</tr>
+<tr>
+<td><strong>Regla 14</strong>: COMPRIMIR CARPETA</td>
+<td>Requiere <code>num_file_ids &gt;= 3</code> (multi-FileID)</td>
+</tr>
+<tr>
+<td><strong>Regla 15</strong>: MODIFICAR (editor)</td>
+<td>Requiere <code>num_file_ids &gt;= 2</code> (multi-FileID)</td>
+</tr>
+<tr>
+<td><strong>Regla 18</strong>: APERTURA EFIMERA</td>
+<td>Reglas 2 y 3 tienen las mismas condiciones y estan antes</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Verificacion experimental</strong>: Al ejecutar el analizador sobre 10.143 operaciones de trazas reales (usuario + ransomware), se encontraron <strong>0 operaciones multi-FileID</strong> y <strong>0 operaciones con CREATEs reutilizados</strong>. Esto confirma que, en la practica, cada operacion usa exactamente un FileID.</p>
+<hr />
+<h3>4.7 Validacion y pruebas</h3>
+<p>Para garantizar la correccion del analizador, se implementaron tres niveles de validacion:</p>
+<ol>
+<li><strong>Tests automatizados</strong> con pytest (55 tests)</li>
+<li><strong>Script de validacion</strong> con 22 casos que cubren todas las reglas</li>
+<li><strong>Validacion con trazas reales</strong> (usuario y ransomware)</li>
+</ol>
+<h4>4.7.1 Tests automatizados con pytest</h4>
+<p>Se eligio <strong>pytest</strong> como framework de testing por su simplicidad y potencia. Los tests se organizan en tres categorias:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">tests</span><span class="o">/</span>
+<span class="w">  </span><span class="n">__init__</span><span class="p">.</span><span class="n">py</span><span class="w">              </span><span class="p">#</span><span class="w"> </span><span class="n">Paquete</span><span class="w"> </span><span class="n">Python</span>
+<span class="w">  </span><span class="n">conftest</span><span class="p">.</span><span class="n">py</span><span class="w">              </span><span class="p">#</span><span class="w"> </span><span class="n">Fixtures</span><span class="w"> </span><span class="n">compartidos</span><span class="w"> </span><span class="p">(</span><span class="n">PaqueteSMB2</span><span class="p">,</span><span class="w"> </span><span class="n">Operacion</span><span class="p">,</span><span class="w"> </span><span class="n">CSV</span><span class="p">)</span>
+<span class="w">  </span><span class="n">test_clasificacion</span><span class="p">.</span><span class="n">py</span><span class="w">    </span><span class="p">#</span><span class="w"> </span><span class="n">Tests</span><span class="w"> </span><span class="n">de</span><span class="w"> </span><span class="n">componente</span><span class="w"> </span><span class="p">(</span><span class="mh">30</span><span class="w"> </span><span class="n">tests</span><span class="p">)</span>
+<span class="w">  </span><span class="n">test_integracion</span><span class="p">.</span><span class="n">py</span><span class="w">      </span><span class="p">#</span><span class="w"> </span><span class="n">Tests</span><span class="w"> </span><span class="n">de</span><span class="w"> </span><span class="n">integracion</span><span class="w"> </span><span class="p">(</span><span class="mh">14</span><span class="w"> </span><span class="n">tests</span><span class="p">)</span>
+<span class="w">  </span><span class="n">test_convertidor</span><span class="p">.</span><span class="n">py</span><span class="w">      </span><span class="p">#</span><span class="w"> </span><span class="n">Tests</span><span class="w"> </span><span class="n">de</span><span class="w"> </span><span class="n">regresion</span><span class="w"> </span><span class="p">(</span><span class="mh">11</span><span class="w"> </span><span class="n">tests</span><span class="p">)</span>
+<span class="w">  </span><span class="n">validar_todas_operaciones</span><span class="p">.</span><span class="n">py</span><span class="w">  </span><span class="p">#</span><span class="w"> </span><span class="n">Script</span><span class="w"> </span><span class="n">de</span><span class="w"> </span><span class="n">validacion</span><span class="w"> </span><span class="p">(</span><span class="mh">22</span><span class="w"> </span><span class="n">operaciones</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Ejecucion</strong>: <code>python -m pytest tests/ -v</code></p>
+<p><strong>Resultado</strong>: 55/55 tests pasan correctamente.</p>
+<h4>4.7.2 Tests de componente (30 tests)</h4>
+<p>Verifican cada regla de clasificacion de forma aislada, creando objetos <code>PaqueteSMB2</code> directamente y probando contra <code>clasificar_operacion()</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Grupo</th>
+<th>Tests</th>
+<th>Que verifica</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TestClasificacionSubirArchivo</code></td>
+<td>3</td>
+<td>CREATE + WRITE + CLOSE (simple, multiples writes, con SET_INFO)</td>
+</tr>
+<tr>
+<td><code>TestClasificacionBajarArchivo</code></td>
+<td>2</td>
+<td>CREATE + READ + CLOSE (simple, multiples reads)</td>
+</tr>
+<tr>
+<td><code>TestClasificacionBorrar</code></td>
+<td>2</td>
+<td>CREATE + SET_INFO(0x0D) + CLOSE (archivo, carpeta)</td>
+</tr>
+<tr>
+<td><code>TestClasificacionRenombrar</code></td>
+<td>2</td>
+<td>CREATE + SET_INFO(0x0A) + CLOSE (archivo, carpeta)</td>
+</tr>
+<tr>
+<td><code>TestClasificacionCrearCarpeta</code></td>
+<td>1</td>
+<td>CREATE(dir) + CLOSE</td>
+</tr>
+<tr>
+<td><code>TestClasificacionCrearArchivoVacio</code></td>
+<td>1</td>
+<td>CREATE(no dir) + CLOSE</td>
+</tr>
+<tr>
+<td><code>TestClasificacionListarDirectorio</code></td>
+<td>2</td>
+<td>CREATE + FIND + CLOSE; solo QUERY_DIRECTORY</td>
+</tr>
+<tr>
+<td><code>TestClasificacionConsultarMetadatos</code></td>
+<td>1</td>
+<td>Solo QUERY_INFO</td>
+</tr>
+<tr>
+<td><code>TestClasificacionCasosEspeciales</code></td>
+<td>5</td>
+<td>CREATE sin CLOSE, solo CLOSE, solo READ, solo WRITE, operacion vacia, CREATE con error</td>
+</tr>
+<tr>
+<td><code>TestClasificacionOperacionesComplejas</code></td>
+<td>3</td>
+<td>MODIFICAR (editor), COMPRIMIR, OPERACION COMPLEJA</td>
+</tr>
+<tr>
+<td><code>TestFuncionesAuxiliares</code></td>
+<td>4</td>
+<td><code>_es_directorio()</code>, <code>_info_classes_en_operacion()</code></td>
+</tr>
+<tr>
+<td><code>TestPrioridadReglas</code></td>
+<td>3</td>
+<td>Verifica que las reglas mas especificas ganan sobre las genericas</td>
+</tr>
+</tbody>
+</table>
+<h4>4.7.3 Tests de integracion (14 tests)</h4>
+<p>Verifican el pipeline completo (CSV -&gt; clasificacion) y el analisis de trazas reales.</p>
+<table>
+<thead>
+<tr>
+<th>Grupo</th>
+<th>Tests</th>
+<th>Que verifica</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TestPipelineCSV</code></td>
+<td>8</td>
+<td>Creacion de CSV temporales, lectura, clasificacion, filtrado de ruido, CREATE sin CLOSE, asincronia</td>
+</tr>
+<tr>
+<td><code>TestReporte</code></td>
+<td>2</td>
+<td>Generacion de reporte sin y con operaciones</td>
+</tr>
+<tr>
+<td><code>TestTrazasReales</code></td>
+<td>4</td>
+<td>Analisis de trazas reales (usuario y ransomware), comparativa</td>
+</tr>
+</tbody>
+</table>
+<h4>4.7.4 Tests de regresion del convertidor (11 tests)</h4>
+<p>Verifican que el script <a href="src/convertir_tabla_a_csv.py"><code>convertir_tabla_a_csv.py</code></a> convierte correctamente el formato tabla de Wireshark a CSV estandar.</p>
+<table>
+<thead>
+<tr>
+<th>Grupo</th>
+<th>Tests</th>
+<th>Que verifica</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TestConversionIndividual</code></td>
+<td>6</td>
+<td>Conversion de CREATE, CLOSE, READ, WRITE, SET_INFO (borrar y renombrar)</td>
+</tr>
+<tr>
+<td><code>TestFiltradoRuido</code></td>
+<td>1</td>
+<td>Filtrado de NEGOTIATE, SESSION_SETUP, TREE_CONNECT</td>
+</tr>
+<tr>
+<td><code>TestFormatoCSV</code></td>
+<td>2</td>
+<td>Cabeceras correctas (16 filas), numero de columnas (20)</td>
+</tr>
+<tr>
+<td><code>TestPipelineCompleto</code></td>
+<td>2</td>
+<td>Conversion + analisis completo (subida y borrado)</td>
+</tr>
+</tbody>
+</table>
+<h4>4.7.5 Script de validacion de todas las operaciones</h4>
+<p>El script <a href="tests/validar_todas_operaciones.py"><code>tests/validar_todas_operaciones.py</code></a> prueba <strong>las 22 operaciones</strong> directamente contra <code>clasificar_operacion()</code>, sin pasar por el pipeline CSV. Esto permite verificar casos multi-FileID que el agrupamiento por FileID no produce naturalmente.</p>
+<p><strong>Resultado</strong>: 22/22 operaciones clasificadas correctamente.</p>
+<div class="codehilite"><pre><span></span><code><span class="o">===</span><span class="w"> </span><span class="n">VALIDACION</span><span class="w"> </span><span class="n">DE</span><span class="w"> </span><span class="n">TODAS</span><span class="w"> </span><span class="n">LAS</span><span class="w"> </span><span class="n">OPERACIONES</span><span class="w"> </span><span class="o">===</span>
+
+<span class="w"> </span><span class="mf">1.</span><span class="w"> </span><span class="n">LISTAR</span><span class="w"> </span><span class="n">DIRECTORIO</span><span class="w"> </span><span class="p">..............</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="w"> </span><span class="mf">2.</span><span class="w"> </span><span class="n">CREAR</span><span class="w"> </span><span class="n">CARPETA</span><span class="w"> </span><span class="p">..................</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="w"> </span><span class="mf">3.</span><span class="w"> </span><span class="n">CREAR</span><span class="w"> </span><span class="n">ARCHIVO</span><span class="w"> </span><span class="n">VACIO</span><span class="w"> </span><span class="p">............</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="w"> </span><span class="mf">4.</span><span class="w"> </span><span class="n">BORRAR</span><span class="w"> </span><span class="n">ARCHIVO</span><span class="w"> </span><span class="p">.................</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="w"> </span><span class="mf">5.</span><span class="w"> </span><span class="n">BORRAR</span><span class="w"> </span><span class="n">CARPETA</span><span class="w"> </span><span class="p">.................</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="w"> </span><span class="mf">6.</span><span class="w"> </span><span class="n">RENOMBRAR</span><span class="o">/</span><span class="n">MOVER</span><span class="w"> </span><span class="n">ARCHIVO</span><span class="w"> </span><span class="p">........</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="w"> </span><span class="mf">7.</span><span class="w"> </span><span class="n">RENOMBRAR</span><span class="o">/</span><span class="n">MOVER</span><span class="w"> </span><span class="n">CARPETA</span><span class="w"> </span><span class="p">........</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="w"> </span><span class="mf">8.</span><span class="w"> </span><span class="n">SUBIR</span><span class="w"> </span><span class="n">ARCHIVO</span><span class="w"> </span><span class="p">..................</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="w"> </span><span class="mf">9.</span><span class="w"> </span><span class="n">BAJAR</span><span class="w"> </span><span class="n">ARCHIVO</span><span class="w"> </span><span class="p">..................</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">10.</span><span class="w"> </span><span class="n">SUBIR</span><span class="w"> </span><span class="n">CARPETA</span><span class="w"> </span><span class="p">..................</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">11.</span><span class="w"> </span><span class="n">BAJAR</span><span class="w"> </span><span class="n">CARPETA</span><span class="w"> </span><span class="p">..................</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">12.</span><span class="w"> </span><span class="n">COPIAR</span><span class="w"> </span><span class="n">ARCHIVO</span><span class="w"> </span><span class="p">(</span><span class="n">subida</span><span class="p">)</span><span class="w"> </span><span class="p">........</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">13.</span><span class="w"> </span><span class="n">COPIAR</span><span class="w"> </span><span class="n">CARPETA</span><span class="w"> </span><span class="p">.................</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">14.</span><span class="w"> </span><span class="n">COMPRIMIR</span><span class="w"> </span><span class="n">ARCHIVO</span><span class="w"> </span><span class="p">..............</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">15.</span><span class="w"> </span><span class="n">COMPRIMIR</span><span class="w"> </span><span class="n">CARPETA</span><span class="w"> </span><span class="p">..............</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">16.</span><span class="w"> </span><span class="n">MODIFICAR</span><span class="w"> </span><span class="n">ARCHIVO</span><span class="w"> </span><span class="p">(</span><span class="n">editor</span><span class="p">)</span><span class="w"> </span><span class="p">.....</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">17.</span><span class="w"> </span><span class="n">MODIFICAR</span><span class="w"> </span><span class="n">ARCHIVO</span><span class="w"> </span><span class="p">(</span><span class="n">atomico</span><span class="p">)</span><span class="w"> </span><span class="p">....</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">18.</span><span class="w"> </span><span class="n">CONSULTAR</span><span class="w"> </span><span class="n">METADATOS</span><span class="w"> </span><span class="p">............</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">19.</span><span class="w"> </span><span class="n">APERTURA</span><span class="w"> </span><span class="n">EFIMERA</span><span class="w"> </span><span class="n">ARCHIVO</span><span class="w"> </span><span class="p">.......</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">20.</span><span class="w"> </span><span class="n">OPERACION</span><span class="w"> </span><span class="n">COMPLEJA</span><span class="w"> </span><span class="p">.............</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">21.</span><span class="w"> </span><span class="n">RUIDO</span><span class="o">/</span><span class="nf">SIN</span><span class="w"> </span><span class="n">OPERACION</span><span class="w"> </span><span class="p">............</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+<span class="mf">22.</span><span class="w"> </span><span class="n">DESCONOCIDA</span><span class="w"> </span><span class="p">....................</span><span class="w"> </span><span class="o">[</span><span class="n">OK</span><span class="o">]</span>
+
+<span class="o">====================================</span>
+<span class="nl">RESULTADO</span><span class="p">:</span><span class="w"> </span><span class="mi">22</span><span class="o">/</span><span class="mi">22</span><span class="w"> </span><span class="n">operaciones</span><span class="w"> </span><span class="n">correctas</span>
+<span class="o">====================================</span>
+</code></pre></div>
+
+<hr />
+<h3>4.8 Analisis de resultados</h3>
+<h4>4.8.1 Traza de usuario</h4>
+<p>Al ejecutar el analizador v2 sobre la traza <a href="Trazas/Traza_user_5.csv"><code>Traza_user_5.csv</code></a> con 26.817 paquetes SMB2, se obtuvieron los siguientes resultados:</p>
+<table>
+<thead>
+<tr>
+<th>Tipo de operacion</th>
+<th>Cantidad</th>
+<th>Porcentaje</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SUBIR ARCHIVO</td>
+<td>2.360</td>
+<td>49,2%</td>
+</tr>
+<tr>
+<td>BORRAR ARCHIVO</td>
+<td>1.180</td>
+<td>24,6%</td>
+</tr>
+<tr>
+<td>BAJAR ARCHIVO</td>
+<td>590</td>
+<td>12,3%</td>
+</tr>
+<tr>
+<td>RENOMBRAR/MOVER ARCHIVO</td>
+<td>590</td>
+<td>12,3%</td>
+</tr>
+<tr>
+<td>CREAR CARPETA</td>
+<td>32</td>
+<td>0,7%</td>
+</tr>
+<tr>
+<td>DESCONOCIDA</td>
+<td>41</td>
+<td>0,9%</td>
+</tr>
+<tr>
+<td><strong>Total</strong></td>
+<td><strong>4.793</strong></td>
+<td><strong>100%</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Interpretacion</strong>:
+- <strong>99,1% de las operaciones se clasifican correctamente</strong>
+- La operacion mas frecuente es SUBIR ARCHIVO (49,2%), coherente con un usuario que sincroniza archivos con la nube
+- Se observa un patron de <strong>BAJAR + SUBIR + RENOMBRAR + BORRAR</strong> que corresponde a la accion de "reemplazar un archivo": el cliente descarga el original, renombra el antiguo, sube el nuevo y borra el renombrado
+- Las 41 operaciones DESCONOCIDA (0,9%) son casos atipicos que requieren analisis manual</p>
+<h4>4.8.2 Traza de ransomware</h4>
+<p>Al ejecutar el analizador v2 sobre la traza <a href="Trazas/Traza_ransom_formato_tabla.csv"><code>Traza_ransom_formato_tabla.csv</code></a> con 26.742 paquetes SMB2, se obtuvieron los siguientes resultados:</p>
+<table>
+<thead>
+<tr>
+<th>Tipo de operacion</th>
+<th>Cantidad</th>
+<th>Porcentaje</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CREAR ARCHIVO VACIO</td>
+<td>2.897</td>
+<td>54,1%</td>
+</tr>
+<tr>
+<td>DESCONOCIDA</td>
+<td>1.152</td>
+<td>21,5%</td>
+</tr>
+<tr>
+<td>BORRAR ARCHIVO</td>
+<td>971</td>
+<td>18,2%</td>
+</tr>
+<tr>
+<td>RENOMBRAR/MOVER ARCHIVO</td>
+<td>298</td>
+<td>5,6%</td>
+</tr>
+<tr>
+<td>CREAR CARPETA</td>
+<td>32</td>
+<td>0,6%</td>
+</tr>
+<tr>
+<td><strong>Total</strong></td>
+<td><strong>5.350</strong></td>
+<td><strong>100%</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Interpretacion</strong>:
+- <strong>78,5% de las operaciones se clasifican correctamente</strong>
+- La operacion mas frecuente es CREAR ARCHIVO VACIO (54,1%), que corresponde al ransomware creando archivos cifrados
+- Hay un 21,5% de DESCONOCIDA, significativamente mas que en la traza de usuario (0,9%)
+- No hay operaciones de SUBIR ARCHIVO ni BAJAR ARCHIVO (el ransomware no descarga ni sube a la nube)
+- El patron tipico es: crear archivo vacio -&gt; escribir datos cifrados -&gt; renombrar -&gt; borrar original</p>
+<h4>4.8.3 Comparativa usuario vs ransomware</h4>
+<table>
+<thead>
+<tr>
+<th>Aspecto</th>
+<th>Usuario</th>
+<th>Ransomware</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Paquetes totales</td>
+<td>26.817</td>
+<td>26.742</td>
+</tr>
+<tr>
+<td>Operaciones totales</td>
+<td>4.793</td>
+<td>5.350</td>
+</tr>
+<tr>
+<td>Operaciones clasificadas</td>
+<td>99,1%</td>
+<td>78,5%</td>
+</tr>
+<tr>
+<td>DESCONOCIDA</td>
+<td>41 (0,9%)</td>
+<td>1.152 (21,5%)</td>
+</tr>
+<tr>
+<td>Operacion principal</td>
+<td>SUBIR ARCHIVO (49,2%)</td>
+<td>CREAR ARCHIVO VACIO (54,1%)</td>
+</tr>
+<tr>
+<td>SUBIR ARCHIVO</td>
+<td>2.360</td>
+<td>0</td>
+</tr>
+<tr>
+<td>BAJAR ARCHIVO</td>
+<td>590</td>
+<td>0</td>
+</tr>
+<tr>
+<td>BORRAR ARCHIVO</td>
+<td>1.180</td>
+<td>971</td>
+</tr>
+<tr>
+<td>RENOMBRAR/MOVER</td>
+<td>590</td>
+<td>298</td>
+</tr>
+<tr>
+<td>CREAR CARPETA</td>
+<td>32</td>
+<td>32</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Diferencias clave</strong>:
+1. <strong>Volumen de operaciones</strong>: El ransomware genera mas operaciones (5.350 vs 4.793) en aproximadamente el mismo numero de paquetes
+2. <strong>Tasa de DESCONOCIDA</strong>: 21,5% en ransomware vs 0,9% en usuario. Esto sugiere que el ransomware usa patrones SMB2 no estandar
+3. <strong>Ausencia de E/S de red</strong>: El ransomware no sube ni baja archivos (0 SUBIR/BAJAR), solo opera localmente
+4. <strong>CREAR ARCHIVO VACIO masivo</strong>: 2.897 operaciones de creacion de archivos vacios, probablemente los archivos cifrados</p>
+<hr />
+<h2>5. CONCLUSIONES Y LINEAS FUTURAS</h2>
+<h3>5.1 Conclusiones</h3>
+<p>En este trabajo se ha desarrollado un analizador de trafico SMB2 capaz de identificar automaticamente las operaciones de usuario a partir de capturas de red de Wireshark. A continuacion se resumen las principales conclusiones obtenidas:</p>
+<p><strong>1. Viabilidad del analisis de trafico SMB2 para identificar operaciones de usuario</strong></p>
+<p>Se ha demostrado que es posible extraer operaciones de alto nivel (subir, bajar, borrar, renombrar, crear carpetas, etc.) a partir de trazas de red SMB2. El uso del <strong>FileID</strong> como mecanismo de agrupacion permite separar de forma fiable las operaciones atomicas, incluso en presencia de asincronia, donde los paquetes de distintas operaciones aparecen entremezclados en la captura.</p>
+<p><strong>2. Alta precision en la clasificacion de trazas de usuario</strong></p>
+<p>Sobre la traza de usuario analizada (26.817 paquetes), el analizador clasifico correctamente el <strong>99,1%</strong> de las operaciones (4.752 de 4.793). Solo 41 operaciones (0,9%) quedaron sin clasificar. Esto valida que las 21 reglas definidas cubren adecuadamente los patrones de uso tipicos de un usuario que sincroniza archivos con la nube.</p>
+<p><strong>3. Diferencias significativas entre trafico legitimo y ransomware</strong></p>
+<p>La comparativa entre la traza de usuario y la de ransomware revelo diferencias cualitativas importantes:</p>
+<ul>
+<li>El ransomware genera una proporcion mucho mayor de <strong>CREAR ARCHIVO VACIO</strong> (54,1% frente a 0% en el usuario)</li>
+<li>El ransomware <strong>no realiza operaciones de subida ni bajada</strong> (0% SUBIR/BAJAR), mientras que en el usuario estas representan el 61,5% del total</li>
+<li>La tasa de <strong>DESCONOCIDA</strong> es significativamente mayor en ransomware (21,5% frente a 0,9%), lo que sugiere que el malware utiliza patrones SMB2 no estandar o comportamientos anomalos</li>
+</ul>
+<p><strong>4. El agrupamiento por FileID como solucion al problema de la asincronia</strong></p>
+<p>La estrategia de agrupar paquetes por FileID (CREATE+CLOSE) resuelve de forma natural el problema del solapamiento temporal de operaciones en SMB2. Al procesar cada FileID de forma independiente, se obtienen secuencias limpias de comandos que corresponden exactamente a una operacion atomica, sin necesidad de ventanas temporales heuristicas.</p>
+<p><strong>5. Validacion exhaustiva del analizador</strong></p>
+<p>Se implementaron tres niveles de validacion (55 tests automatizados, script de validacion con 22/22 operaciones correctas, y validacion con trazas reales) que garantizan la correccion del analizador y facilitan la deteccion de regresiones ante futuros cambios.</p>
+<h3>5.2 Limitaciones e Incertidumbre</h3>
+<p>A continuacion se detallan las limitaciones identificadas durante el desarrollo y las fuentes de incertidumbre que afectan a los resultados obtenidos.</p>
+<h4>5.2.1 Limitaciones del analisis actual</h4>
+<ol>
+<li>
+<p><strong>Operaciones compuestas no detectadas</strong>: El analisis actual trata cada FileID como una operacion independiente. No agrupa las sub-operaciones que forman una accion de usuario de alto nivel (como "subir carpeta completa" o "modificar archivo con editor"). Esto significa que una accion que el usuario percibe como una unica operacion (ej: modificar un archivo) se descompone en varias operaciones atomicas (bajar + subir).</p>
+</li>
+<li>
+<p><strong>Alta tasa de DESCONOCIDA en ransomware</strong>: El 21,5% de operaciones no clasificadas en la traza de ransomware indica que hay patrones no cubiertos por las reglas actuales. Esto limita la capacidad de caracterizar completamente el comportamiento del malware.</p>
+</li>
+<li>
+<p><strong>Deteccion de ransomware</strong>: Aunque el analisis identifica correctamente las operaciones, no distingue entre un patron legitimo y uno malicioso. No hay un clasificador binario (ransomware si/no) que permita alertar automaticamente.</p>
+</li>
+<li>
+<p><strong>Dependencia del formato CSV</strong>: El analisis depende de la correcta exportacion desde Wireshark. Campos mal formateados o columnas faltantes pueden afectar los resultados. El formato de exportacion debe configurarse manualmente con las columnas adecuadas.</p>
+</li>
+<li>
+<p><strong>Solo dos trazas de validacion</strong>: La validacion se ha realizado sobre solo dos trazas (una de usuario, una de ransomware). Se necesitarian mas muestras de diferentes usuarios y diferentes variantes de ransomware para generalizar los resultados y validar la robustez de las reglas.</p>
+</li>
+<li>
+<p><strong>QUERY_DIRECTORY (FIND) sin FileID</strong>: Los comandos <code>QUERY_DIRECTORY</code> no tienen FileID, por lo que se agrupan por TreeID con ventana temporal. Esto impide asociarlos directamente con la operacion CREATE+CLOSE que los origina, limitando la precision en operaciones como "listar directorio" o "crear carpeta con comprobacion previa".</p>
+</li>
+</ol>
+<h4>5.2.2 Fuentes de incertidumbre</h4>
+<ol>
+<li>
+<p><strong>Asincronia de SMB2</strong>: Aunque el agrupamiento por FileID resuelve la mayoria de los casos, la naturaleza asincrona del protocolo puede provocar que algunos paquetes queden fuera de su operacion correspondiente si el CLOSE llega muy tarde o si hay CREATEs anidados sin cerrar.</p>
+</li>
+<li>
+<p><strong>Variabilidad en CreateOptions</strong>: Los valores de <code>CreateOptions</code> pueden variar segun el cliente SMB2 (Windows, Linux, macOS) y la configuracion del servicio de nube. Esto puede afectar a la deteccion de directorios (Regla 2) y archivos vacios (Regla 3).</p>
+</li>
+<li>
+<p><strong>Comportamiento especifico del proveedor de nube</strong>: Los patrones observados pueden ser especificos de OneDrive (utilizado en las trazas). Otros servicios como Google Drive o Dropbox podrian generar patrones SMB2 diferentes.</p>
+</li>
+<li>
+<p><strong>Ruido de fondo del sistema operativo</strong>: El sistema operativo genera operaciones SMB2 internas (consultas de metadatos, notificaciones de cambio) que se entremezclan con las operaciones del usuario y pueden ser dificiles de distinguir.</p>
+</li>
+</ol>
+<h3>5.3 Trabajo Futuro: Deteccion de Ransomware</h3>
+<p>Los resultados obtenidos en este trabajo sientan las bases para una linea de investigacion prometedora: la <strong>deteccion de ransomware basada en el analisis de trafico SMB2</strong>. A continuacion se proponen las principales direcciones para el trabajo futuro.</p>
+<h4>5.3.1 Clasificador binario de ransomware</h4>
+<p>El siguiente paso natural es desarrollar un clasificador que, a partir de las operaciones detectadas por el analizador, determine si el comportamiento observado corresponde a un usuario legitimo o a un ransomware. Las variables mas prometedoras para la clasificacion son:</p>
+<ul>
+<li><strong>Proporcion de CREAR ARCHIVO VACIO</strong>: En la traza de ransomware, el 54,1% de las operaciones fueron CREAR ARCHIVO VACIO, frente a 0% en el usuario</li>
+<li><strong>Tasa de DESCONOCIDA</strong>: 21,5% en ransomware vs 0,9% en usuario</li>
+<li><strong>Ausencia de operaciones de red</strong>: El ransomware no realiza SUBIR ARCHIVO ni BAJAR ARCHIVO</li>
+<li><strong>Velocidad de operaciones</strong>: Numero de operaciones de borrado o creacion por minuto</li>
+<li><strong>Relacion CREATE/CLOSE</strong>: Posibles desequilibrios en operaciones de ransomware</li>
+</ul>
+<p>Se podria implementar un clasificador basado en umbrales (reglas heuristicas) o un modelo de machine learning simple (arbol de decision, regresion logistica) entrenado con las caracteristicas extraidas de las operaciones.</p>
+<h4>5.3.2 Analisis de las 1.152 operaciones DESCONOCIDA del ransomware</h4>
+<p>Las 1.152 operaciones no clasificadas en la traza de ransomware representan una oportunidad para:</p>
+<ol>
+<li><strong>Identificar nuevos patrones SMB2 especificos de ransomware</strong>: Analizar manualmente estas operaciones para descubrir comportamientos no cubiertos por las reglas actuales</li>
+<li><strong>Extraer firmas de comportamiento</strong>: Caracteristicas distintivas que puedan servir como indicadores de compromiso (IoC) a nivel de red</li>
+<li><strong>Refinar las reglas de clasificacion</strong>: Anyadir nuevas reglas que capturen estos patrones, reduciendo la tasa de DESCONOCIDA</li>
+</ol>
+<h4>5.3.3 Agrupamiento jerarquico de operaciones</h4>
+<p>Una limitacion actual es que las operaciones compuestas (ej: "modificar archivo" = bajar + modificar + subir) se tratan como operaciones independientes. Un segundo nivel de agrupamiento podria:</p>
+<ol>
+<li><strong>Fusionar operaciones atomicas</strong> que comparten la misma ruta base y ocurren en el mismo intervalo temporal</li>
+<li><strong>Reconstruir la secuencia completa</strong> de una accion de usuario de alto nivel</li>
+<li><strong>Mejorar la precision del clasificador</strong> al operar sobre acciones completas en lugar de sub-operaciones atomicas</li>
+</ol>
+<h4>5.3.4 Ampliacion del conjunto de datos de validacion</h4>
+<p>Para generalizar los resultados y validar la robustez del enfoque, seria necesario:</p>
+<ol>
+<li><strong>Capturar mas trazas de usuario</strong> con diferentes perfiles de uso (trabajo ofimatico, desarrollo, diseno, etc.)</li>
+<li><strong>Obtener trazas de diferentes variantes de ransomware</strong> para identificar patrones comunes y especificos</li>
+<li><strong>Probar con diferentes proveedores de nube</strong> (Google Drive, Dropbox, Nextcloud) para evaluar la portabilidad del analisis</li>
+</ol>
+<h4>5.3.5 Visualizacion y monitorizacion en tiempo real</h4>
+<p>Otras lineas de trabajo futuro incluyen:</p>
+<ol>
+<li><strong>Generacion de graficos</strong> con la distribucion temporal de las operaciones para identificar patrones de comportamiento visualmente</li>
+<li><strong>Analisis de volumen</strong>: Incorporar el tamano de los datos transferidos (<code>total_read</code>, <code>total_write</code>) para distinguir entre operaciones de archivos pequenos y grandes</li>
+<li><strong>Soporte para ODS</strong>: Anadir la capacidad de leer directamente archivos ODS ademas de CSV</li>
+<li><strong>Monitorizacion en tiempo real</strong>: Adaptar el analizador para procesar trafico SMB2 en vivo y generar alertas ante comportamientos sospechosos</li>
+</ol>
+</body>
+</html>
