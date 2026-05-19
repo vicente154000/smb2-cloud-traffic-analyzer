@@ -525,6 +525,62 @@ def construir_operaciones():
         op.anyadir(p)
     casos.append(("DESCONOCIDA", op))
 
+    # ------------------------------------------------------------------
+    # DEMOSTRACION: OPERACION MULTI-FILEID DESORDENADA
+    # COMPRIMIR ARCHIVO con paquetes entremezclados (como en captura real)
+    # Si se pasa por agrupar_por_operacion(), se separa en 2 operaciones
+    # atomicas. Aqui se prueba directamente con clasificar_operacion()
+    # para ver que el clasificador SI podria identificarlo si los
+    # paquetes llegaran juntos.
+    # ------------------------------------------------------------------
+    op = Operacion()
+    for p in [
+        # Los paquetes aparecen entremezclados en la captura real
+        pkt("CREATE", linea=200, timestamp=21.0, file_id="FID_MULTI_A",
+            file_path="ruta/documento.docx", create_options=0x60),
+        pkt("READ", linea=201, timestamp=21.1, file_id="FID_MULTI_A",
+            read_len=4096, read_offset=0),
+        # Se intercala un paquete de otro FileID
+        pkt("CREATE", linea=202, timestamp=21.2, file_id="FID_MULTI_B",
+            file_path="ruta/documento.zip", create_options=0x60),
+        pkt("READ", linea=203, timestamp=21.3, file_id="FID_MULTI_A",
+            read_len=4096, read_offset=0),
+        pkt("SET_INFO", linea=204, timestamp=21.25, file_id="FID_MULTI_B",
+            info_class=INFO_CLASS_ALLOCATION_INFO),
+        pkt("WRITE", linea=205, timestamp=21.3, file_id="FID_MULTI_B",
+            write_len=4096, write_offset=0),
+        pkt("CLOSE", linea=206, timestamp=21.4, file_id="FID_MULTI_B"),
+        pkt("CLOSE", linea=207, timestamp=21.5, file_id="FID_MULTI_A"),
+    ]:
+        op.anyadir(p)
+    # Nota: esto solo funciona en el validador porque NO pasa por
+    # agrupar_por_operacion(). En el analizador real, agrupar_por_operacion()
+    # separaria FID_MULTI_A y FID_MULTI_B en 2 operaciones atomicas:
+    #   FID_MULTI_A: CREATE+READ+READ+CLOSE -> BAJAR ARCHIVO
+    #   FID_MULTI_B: CREATE+SET_INFO+WRITE+CLOSE -> SUBIR ARCHIVO
+    # El clasificador lo identifica como COMPRIMIR ARCHIVO porque ve todos
+    # los comandos juntos. En el analizador real, agrupar_por_operacion()
+    # separaria FID_MULTI_A y FID_MULTI_B en 2 operaciones atomicas:
+    #   FID_MULTI_A: CREATE+READ+READ+CLOSE -> BAJAR ARCHIVO
+    #   FID_MULTI_B: CREATE+SET_INFO+WRITE+CLOSE -> SUBIR ARCHIVO
+    # Nota: el clasificador lo identifica como COMPRIMIR ARCHIVO porque
+    # ve todos los comandos juntos (CREATE+READ+CREATE+SET_INFO+WRITE+CLOSE+CLOSE
+    # con >=2 FileIDs). En el analizador REAL, agrupar_por_operacion()
+    # separaria FID_MULTI_A y FID_MULTI_B en 2 operaciones atomicas:
+    #   FID_MULTI_A: CREATE+READ+READ+CLOSE -> BAJAR ARCHIVO
+    #   FID_MULTI_B: CREATE+SET_INFO+WRITE+CLOSE -> SUBIR ARCHIVO
+    # Esto demuestra que el clasificador SABE reconocer operaciones
+    # multi-FileID, pero nunca las ve en la practica porque el
+    # agrupamiento las separa antes.
+    # El clasificador lo identifica como COMPRIMIR ARCHIVO porque ve todos
+    # los comandos juntos (CREATE+READ+CREATE+SET_INFO+WRITE+CLOSE+CLOSE
+    # con >=2 FileIDs). En el analizador REAL, agrupar_por_operacion()
+    # separaria FID_MULTI_A y FID_MULTI_B en 2 operaciones atomicas.
+    # Esto demuestra que el clasificador SABE reconocer operaciones
+    # multi-FileID, pero nunca las ve en la practica porque el
+    # agrupamiento las separa antes.
+    casos.append(("COMPRIMIR ARCHIVO", op))
+
     return casos
 
 
